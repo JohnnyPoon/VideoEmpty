@@ -1,0 +1,81 @@
+using VideoEmpty.Core.Model;
+
+namespace VideoEmpty.Core.Api;
+
+public sealed record AddInstanceRequest(
+    string TemplateId,
+    double CenterX,
+    double CenterY,
+    int StartMs,
+    int? DurationMs = null,
+    Dictionary<string, string>? TextValues = null,
+    Animation? AnimationOverride = null);
+
+public sealed record UpdateInstanceRequest(
+    string InstanceId,
+    double? CenterX = null,
+    double? CenterY = null,
+    int? StartMs = null,
+    int? DurationMs = null,
+    Dictionary<string, string>? TextValues = null,
+    Animation? AnimationOverride = null);
+
+public sealed record VideoInfo(int Width, int Height, double Fps, int DurationMs);
+
+public sealed record ExportOptions(
+    string OutputPath,
+    string VideoCodec = "libx264",
+    string AudioCodec = "aac",
+    int? VideoBitrateKbps = null,
+    int? Crf = 18);
+
+public enum JobState { Pending, Running, Completed, Failed, Cancelled }
+
+public sealed class JobStatus
+{
+    public string JobId { get; set; } = "";
+    public JobState State { get; set; }
+    public double Progress { get; set; } // 0..1
+    public string? Message { get; set; }
+    public string? OutputPath { get; set; }
+    public string? Error { get; set; }
+}
+
+/// <summary>
+/// Unified API surface for VideoEmpty. Implemented in-process; UI calls it directly,
+/// HTTP server and MCP server are thin adapters over this interface.
+/// </summary>
+public interface IVideoEmptyApi
+{
+    // Project
+    Project CreateProject(string name);
+    Project OpenProject(string path);
+    void SaveProject(Project project, string path);
+    Task<Project> SetVideoAsync(Project project, string videoPath, CancellationToken ct = default);
+
+    // Templates
+    IReadOnlyList<Template> ListTemplates(Project project);
+    Template GetTemplate(Project project, string templateId);
+    Template CreateTemplate(Project project, Template template);
+    Template UpdateTemplate(Project project, Template template);
+    void DeleteTemplate(Project project, string templateId);
+    Template DuplicateTemplate(Project project, string templateId, string? newName = null);
+
+    // Instances
+    TemplateInstance AddInstance(Project project, AddInstanceRequest request);
+    TemplateInstance UpdateInstance(Project project, UpdateInstanceRequest request);
+    void DeleteInstance(Project project, string instanceId);
+    IReadOnlyList<TemplateInstance> ListInstances(Project project);
+
+    // Preview
+    Task<byte[]> RenderFrameAsync(Project project, int timeMs, CancellationToken ct = default);
+    byte[] RenderTemplatePreview(Template template, IReadOnlyDictionary<string, string>? textValues = null);
+
+    // Export
+    string StartExport(Project project, ExportOptions options);
+    JobStatus GetJobStatus(string jobId);
+    void CancelJob(string jobId);
+
+    // Dependencies
+    IDependencyManager Dependencies { get; }
+}

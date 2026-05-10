@@ -1,0 +1,92 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:model="using:VideoEmpty.Core.Model"
+        x:Class="VideoEmpty.UI.MainWindow"
+        Title="VideoEmpty" Width="1280" Height="800">
+    <DockPanel>
+        <!-- Toolbar -->
+        <StackPanel DockPanel.Dock="Top" Orientation="Horizontal" Spacing="8" Margin="8">
+            <Button x:Name="OpenVideoButton" Content="Open Video…"/>
+            <Button x:Name="SaveProjectButton" Content="Save Project…"/>
+            <Button x:Name="ExportButton" Content="Export…"/>
+            <Button x:Name="InstallDepsButton" Content="Install FFmpeg…" IsVisible="False"/>
+            <Button x:Name="OpenLogButton" Content="Open Log"/>
+            <TextBlock x:Name="VideoInfoLabel" VerticalAlignment="Center" Margin="16,0,0,0"/>
+        </StackPanel>
+
+        <!-- Status bar -->
+        <Border DockPanel.Dock="Bottom" Background="#222" Padding="6,3">
+            <StackPanel Orientation="Horizontal" Spacing="16">
+                <TextBlock x:Name="ArmedLabel" Foreground="White" Text="(none armed)"/>
+                <TextBlock x:Name="TimeLabel" Foreground="White"/>
+                <TextBlock x:Name="ExportStatus" Foreground="LightGreen"/>
+            </StackPanel>
+        </Border>
+
+        <Grid ColumnDefinitions="200,*,320">
+            <!-- Template palette -->
+            <Border Grid.Column="0" BorderBrush="#444" BorderThickness="0,0,1,0" Padding="6">
+                <DockPanel>
+                    <TextBlock DockPanel.Dock="Top" Text="Templates" FontWeight="Bold" Margin="0,0,0,6"/>
+                    <ListBox x:Name="TemplatesList">
+                        <ListBox.ItemTemplate>
+                            <DataTemplate DataType="model:Template">
+                                <TextBlock Text="{Binding Name}"/>
+                            </DataTemplate>
+                        </ListBox.ItemTemplate>
+                    </ListBox>
+                </DockPanel>
+            </Border>
+
+            <!-- Center: preview + playback -->
+            <DockPanel Grid.Column="1" Margin="6">
+                <StackPanel DockPanel.Dock="Bottom" Spacing="4" Margin="0,4,0,0">
+                    <Slider x:Name="TimeSlider" Minimum="0" Maximum="1" Value="0"/>
+                    <StackPanel Orientation="Horizontal" Spacing="6" HorizontalAlignment="Center">
+                        <Button x:Name="JumpBack10sButton"  Content="«10s" ToolTip.Tip="Back 10 seconds"/>
+                        <Button x:Name="JumpBack1sButton"   Content="«1s"  ToolTip.Tip="Back 1 second"/>
+                        <Button x:Name="StepBackButton"     Content="◄|"   ToolTip.Tip="Previous frame"/>
+                        <Button x:Name="PlayPauseButton"    Content="▶ Play" MinWidth="80"/>
+                        <Button x:Name="StepForwardButton"  Content="|►"   ToolTip.Tip="Next frame"/>
+                        <Button x:Name="JumpForward1sButton" Content="1s»" ToolTip.Tip="Forward 1 second"/>
+                        <Button x:Name="JumpForward10sButton" Content="10s»" ToolTip.Tip="Forward 10 seconds"/>
+                        <CheckBox x:Name="LoopCheck" Content="Loop" VerticalAlignment="Center" Margin="12,0,0,0"/>
+                        <TextBlock x:Name="PlaybackTimeLabel" VerticalAlignment="Center" Margin="12,0,0,0" Text="0:00.000 / 0:00.000"/>
+                    </StackPanel>
+                </StackPanel>
+                <Border Background="#111">
+                    <Image x:Name="PreviewImage" Stretch="Uniform"/>
+                </Border>
+            </DockPanel>
+
+            <!-- Right: timeline + properties -->
+            <DockPanel Grid.Column="2" Margin="6">
+                <TextBlock DockPanel.Dock="Top" Text="Instances" FontWeight="Bold"/>
+                <StackPanel x:Name="InstanceEditor" DockPanel.Dock="Bottom" Spacing="4" IsVisible="False" Margin="0,8,0,0">
+                    <TextBlock Text="Selected instance" FontWeight="Bold"/>
+                    <Grid ColumnDefinitions="80,*" RowDefinitions="Auto,Auto,Auto,Auto,Auto" RowSpacing="4" ColumnSpacing="6">
+                        <TextBlock Text="Start ms"/>      <TextBox Grid.Column="1" x:Name="InstanceStartBox"/>
+                        <TextBlock Grid.Row="1" Text="Duration ms"/> <TextBox Grid.Row="1" Grid.Column="1" x:Name="InstanceDurationBox"/>
+                        <TextBlock Grid.Row="2" Text="Center X"/>    <TextBox Grid.Row="2" Grid.Column="1" x:Name="InstanceXBox"/>
+                        <TextBlock Grid.Row="3" Text="Center Y"/>    <TextBox Grid.Row="3" Grid.Column="1" x:Name="InstanceYBox"/>
+                        <TextBlock Grid.Row="4" Text="Text"/>        <TextBox Grid.Row="4" Grid.Column="1" x:Name="InstanceTextBox" AcceptsReturn="True" Height="80"/>
+                    </Grid>
+                    <StackPanel Orientation="Horizontal" Spacing="6">
+                        <Button x:Name="ApplyInstanceButton" Content="Apply"/>
+                        <Button x:Name="DeleteInstanceButton" Content="Delete"/>
+                    </StackPanel>
+                </StackPanel>
+                <ListBox x:Name="InstancesList">
+                    <ListBox.ItemTemplate>
+                        <DataTemplate DataType="model:TemplateInstance">
+                            <StackPanel Orientation="Horizontal" Spacing="8">
+                                <TextBlock Text="{Binding StartMs, StringFormat={}{0} ms}"/>
+                                <TextBlock Text="{Binding TemplateId}"/>
+                            </StackPanel>
+                        </DataTemplate>
+                    </ListBox.ItemTemplate>
+                </ListBox>
+            </DockPanel>
+        </Grid>
+    </DockPanel>
+</Window>
