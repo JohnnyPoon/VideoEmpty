@@ -165,6 +165,102 @@ public sealed class VideoEmptyApi : IVideoEmptyApi
     public string StartExport(Project project, ExportOptions options) =>
         _exporter.Start(project, options);
 
+    public async Task ExportSubtitlesAsync(Project project, ExportSubtitlesOptions options, CancellationToken ct = default)
+    {
+        var entries = new List<SubtitleEntry>();
+        var index = 1;
+
+        foreach (var inst in project.Instances.OrderBy(i => i.StartMs))
+        {
+            var template = project.Templates.FirstOrDefault(t => t.Id == inst.TemplateId);
+            if (template is null) continue;
+
+            // Filter by template type/name if requested
+            if (!string.IsNullOrEmpty(options.TemplateTypeFilter) &&
+                !template.Name.Contains(options.TemplateTypeFilter, StringComparison.OrdinalIgnoreCase))
+                continue;
+
+            // Filter by time range
+            var endMs = inst.StartMs + inst.DurationMs;
+            if (options.StartTimeMs is not null && endMs < options.StartTimeMs)
+                continue;
+            if (options.EndTimeMs is not null && inst.StartMs > options.EndTimeMs)
+                continue;
+
+            // Combine all text values
+            var text = string.Join("\n",
+                inst.TextValues.Values
+                    .Where(v => !string.IsNullOrWhiteSpace(v)));
+
+            if (!string.IsNullOrEmpty(text))
+            {
+                entries.Add(new SubtitleEntry(
+                    IndexOrId: index++,
+                    StartMs: inst.StartMs,
+                    EndMs: endMs,
+                    Text: text,
+                    TemplateName: template.Name,
+                    CenterX: inst.Center.X,
+                    CenterY: inst.Center.Y));
+            }
+        }
+
+        var content = options.Format.ToLower() switch
+        {
+            "srt" => FormatAsSrt(entries),
+            "vtt" => FormatAsVtt(entries),
+            "json" => FormatAsJson(entries),
+            _ => throw new ArgumentException($"Unknown subtitle format: {options.Format}")
+        };
+
+        await System.IO.File.WriteAllTextAsync(options.OutputPath, content, ct).ConfigureAwait(false);
+    }
+
+    private static string FormatAsSrt(List<SubtitleEntry> entries)
+    {
+        var sb = new System.Text.StringBuilder();
+        foreach (var e in entries)
+        {
+            sb.AppendLine(e.IndexOrId.ToString());
+            sb.AppendLine($"{FormatTimestampSrt(e.StartMs)} --> {FormatTimestampSrt(e.EndMs)}");
+            sb.AppendLine(e.Text);
+            sb.AppendLine();
+        }
+        return sb.ToString();
+    }
+
+    private static string FormatTimestampSrt(int ms)
+    {
+        var ts = TimeSpan.FromMilliseconds(ms);
+        return $"{ts.Hours:D2}:{ts.Minutes:D2}:{ts.Seconds:D2},{ts.Milliseconds:D3}";
+    }
+
+    private static string FormatAsVtt(List<SubtitleEntry> entries)
+    {
+        var sb = new System.Text.StringBuilder();
+        sb.AppendLine("WEBVTT");
+        sb.AppendLine();
+        foreach (var e in entries)
+        {
+            sb.AppendLine($"{FormatTimestampVtt(e.StartMs)} --> {FormatTimestampVtt(e.EndMs)}");
+            sb.AppendLine(e.Text);
+            sb.AppendLine();
+        }
+        return sb.ToString();
+    }
+
+    private static string FormatTimestampVtt(int ms)
+    {
+        var ts = TimeSpan.FromMilliseconds(ms);
+        return $"{ts.Hours:D2}:{ts.Minutes:D2}:{ts.Seconds:D2}.{ts.Milliseconds:D3}";
+    }
+
+    private static string FormatAsJson(List<SubtitleEntry> entries)
+    {
+        var options = new System.Text.Json.JsonSerializerOptions { WriteIndented = true };
+        return System.Text.Json.JsonSerializer.Serialize(entries, options);
+    }
+
     public JobStatus GetJobStatus(string jobId) => _exporter.GetStatus(jobId);
 
     public void CancelJob(string jobId) => _exporter.Cancel(jobId);

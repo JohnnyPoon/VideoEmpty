@@ -58,7 +58,8 @@
                 <Button x:Name="OpenVideoButton" Content="Open Video…"/>
                 <Button x:Name="SaveProjectButton" Content="Save Project…"/>
                 <Button x:Name="UndoButton" Content="Undo"/>
-                <Button x:Name="ExportButton" Content="Export…"/>
+                <Button x:Name="ExportButton" Content="Export Video…" ToolTip.Tip="Export the video with captions"/>
+                <Button x:Name="ExportSubtitlesButton" Content="Export Subtitles…" ToolTip.Tip="Export captions as .srt, .vtt, or .json"/>
                 <Button x:Name="SettingsButton" Content="Settings…"/>
                 <Button x:Name="InstallDepsButton" Content="Install FFmpeg…" IsVisible="False"/>
                 <Button x:Name="OpenLogButton" Content="Open Log"/>

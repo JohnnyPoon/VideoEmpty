@@ -29,6 +29,22 @@ public sealed record ExportOptions(
     int? VideoBitrateKbps = null,
     int? Crf = 18);
 
+public sealed record ExportSubtitlesOptions(
+    string OutputPath,
+    string Format = "srt", // "srt", "vtt", "json"
+    string? TemplateTypeFilter = null, // null = all, or "step", "comment", etc.
+    int? StartTimeMs = null,
+    int? EndTimeMs = null);
+
+public sealed record SubtitleEntry(
+    int IndexOrId,
+    int StartMs,
+    int EndMs,
+    string Text,
+    string TemplateName,
+    double? CenterX,
+    double? CenterY);
+
 public enum JobState { Pending, Running, Completed, Failed, Cancelled }
 
 public sealed class JobStatus
@@ -73,6 +89,7 @@ public interface IVideoEmptyApi
 
     // Export
     string StartExport(Project project, ExportOptions options);
+    Task ExportSubtitlesAsync(Project project, ExportSubtitlesOptions options, CancellationToken ct = default);
     JobStatus GetJobStatus(string jobId);
     void CancelJob(string jobId);
 

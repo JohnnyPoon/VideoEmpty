@@ -67,6 +67,7 @@ public partial class MainWindow : Window
         DashboardButton.Click += (_, _) => ShowDashboard();
         OpenVideoButton.Click += OnOpenVideo;
         ExportButton.Click += OnExport;
+        ExportSubtitlesButton.Click += OnExportSubtitles;
         InstallDepsButton.Click += OnInstallDeps;
         OpenLogButton.Click += (_, _) => OpenInShell(Log.LogPath);
 
@@ -1319,6 +1320,48 @@ public partial class MainWindow : Window
         var jobId = _api.StartExport(_project, new ExportOptions(path));
         ExportStatus.Text = $"Job {jobId[..8]}… running";
         _ = PollJob(jobId);
+    }
+
+    private async void OnExportSubtitles(object? sender, RoutedEventArgs e)
+    {
+        if (_project.Instances.Count == 0)
+        {
+            VideoInfoLabel.Text = "Add some captions first.";
+            return;
+        }
+        var file = await StorageProvider.SaveFilePickerAsync(new FilePickerSaveOptions
+        {
+            Title = "Export Subtitles",
+            DefaultExtension = "srt",
+            SuggestedFileName = "captions.srt"
+        });
+        var path = file?.TryGetLocalPath();
+        if (path is null) return;
+
+        try
+        {
+            var ext = Path.GetExtension(path).ToLower().TrimStart('.');
+            var format = ext switch
+            {
+                "srt" => "srt",
+                "vtt" => "vtt",
+                "json" => "json",
+                _ => "srt"
+            };
+            var options = new ExportSubtitlesOptions(
+                OutputPath: path,
+                Format: format,
+                TemplateTypeFilter: null,
+                StartTimeMs: null,
+                EndTimeMs: null);
+            await _api.ExportSubtitlesAsync(_project, options);
+            ExportStatus.Text = $"Subtitles exported → {Path.GetFileName(path)}";
+        }
+        catch (Exception ex)
+        {
+            Log.Error("UI", "Subtitle export failed", ex);
+            ExportStatus.Text = $"Export failed: {ex.Message}";
+        }
     }
 
     private async Task PollJob(string jobId)
