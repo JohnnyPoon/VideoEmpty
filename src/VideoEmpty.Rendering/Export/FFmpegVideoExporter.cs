@@ -12,10 +12,13 @@ namespace VideoEmpty.Rendering.Export;
 /// <summary>
 /// Exports the project by pre-rendering every animation frame as a full-resolution
 /// transparent PNG (position baked in via SkiaSharp), then compositing the sequences
-/// onto the source video with FFmpeg. PTS alignment is done via <c>setpts</c> inside
-/// the filter_complex rather than <c>-itsoffset</c>, which is unreliable with image2
-/// inputs on some FFmpeg builds. <c>-shortest</c> is intentionally omitted so the
-/// source video, not an image sequence, determines the output duration.
+/// onto the source video with FFmpeg.
+///
+/// Timing strategy: each sequence is pre-padded with transparent frames so that
+/// every image2 input starts at t=0 in the filter graph. This avoids <c>setpts</c>
+/// and <c>-itsoffset</c>, both of which can mis-align overlay frames when the image2
+/// time base differs from the main video time base. <c>-shortest</c> is intentionally
+/// omitted so the source video determines the output duration.
 /// </summary>
 public sealed class FFmpegVideoExporter : IVideoExporter
 {
@@ -119,8 +122,45 @@ public sealed class FFmpegVideoExporter : IVideoExporter
                 seqInfos.Add((seqDir, frameCount, inst));
             }
 
-            // 2. Build ffmpeg argv using the pre-rendered sequences.
-            var args = BuildExportArgsFromSequences(project, options, seqInfos, fps);
+            // 2. Pre-pad each sequence with transparent frames so that every image2
+            //    input starts at t=0 in the filter graph.  This eliminates the need
+            //    for setpts or -itsoffset PTS shifting, which can cause frame-sync
+            //    issues when the image2 time base differs from the main video time base.
+            job.Status.Message = "Padding overlay sequences";
+
+            // Shared transparent frame (all-zero alpha) used for padding.
+            var transparentPath = Path.Combine(work, "transparent.png");
+            {
+                using var bmp = new SkiaSharp.SKBitmap(vw, vh, SkiaSharp.SKColorType.Rgba8888, SkiaSharp.SKAlphaType.Premul);
+                using var cvs = new SkiaSharp.SKCanvas(bmp);
+                cvs.Clear(SkiaSharp.SKColors.Transparent);
+                using var img = SkiaSharp.SKImage.FromBitmap(bmp);
+                using var enc = img.Encode(SkiaSharp.SKEncodedImageFormat.Png, 90);
+                await File.WriteAllBytesAsync(transparentPath, enc.ToArray(), job.Cts.Token).ConfigureAwait(false);
+            }
+
+            var paddedSeqInfos = new List<(string dir, int frameCount, TemplateInstance inst)>(seqInfos.Count);
+            foreach (var (seqDir, animFrames, inst) in seqInfos)
+            {
+                int padFrames = (int)Math.Round(inst.StartMs * fps / 1000.0);
+                if (padFrames > 0)
+                {
+                    // Rename animation frames to make room at the start of the sequence.
+                    for (int f = animFrames - 1; f >= 0; f--)
+                    {
+                        var oldPath = Path.Combine(seqDir, $"frame_{f:D6}.png");
+                        var newPath = Path.Combine(seqDir, $"frame_{f + padFrames:D6}.png");
+                        File.Move(oldPath, newPath);
+                    }
+                    // Fill the vacated slots with the shared transparent frame.
+                    for (int f = 0; f < padFrames; f++)
+                        File.Copy(transparentPath, Path.Combine(seqDir, $"frame_{f:D6}.png"));
+                }
+                paddedSeqInfos.Add((seqDir, padFrames + animFrames, inst));
+            }
+
+            // 3. Build ffmpeg argv using the padded pre-rendered sequences.
+            var args = BuildExportArgsFromSequences(project, options, paddedSeqInfos, fps);
             VideoEmpty.Core.Diagnostics.Log.Info("ffmpeg-export", $"{_bin.FFmpegPath} {string.Join(" ", args)}");
             job.Status.Progress = 0.1;
             job.Status.Message = "Encoding video";
@@ -186,11 +226,10 @@ public sealed class FFmpegVideoExporter : IVideoExporter
     /// <summary>
     /// Builds FFmpeg args using pre-rendered per-frame PNG sequences.
     /// Position is baked into every PNG (x=0:y=0 in overlay).
-    /// PTS is shifted inside the filter_complex via setpts so FFmpeg's image2
-    /// demuxer (which always starts at PTS=0) is reliable across all platforms.
-    /// NOTE: -shortest is intentionally omitted — the source video determines the
-    /// output duration. -itsoffset is avoided because it mis-aligns image2 inputs
-    /// in the filter graph on some FFmpeg builds.
+    /// Each sequence is already pre-padded with transparent frames so that it starts
+    /// at t=0; no setpts or -itsoffset is needed. The enable window end is extended
+    /// by one frame + a small epsilon to ensure the final exit-animation frame
+    /// (which is fully off-screen) is included before the overlay is gated off.
     /// </summary>
     internal static List<string> BuildExportArgsFromSequences(
         Project project, ExportOptions options,
@@ -200,9 +239,8 @@ public sealed class FFmpegVideoExporter : IVideoExporter
         var inv = CultureInfo.InvariantCulture;
         var args = new List<string> { "-y", "-i", project.VideoPath! };
 
-        // Add every image-sequence input at natural PTS (0-based).
-        // PTS offsetting is handled by setpts inside the filter graph, which is
-        // guaranteed to be applied after demuxing and is independent of -itsoffset quirks.
+        // Add every image-sequence input.  PTS starts at 0 for all inputs because
+        // transparent padding frames have already been prepended in RunJob.
         foreach (var (dir, _, _) in seqInfos)
         {
             args.Add("-f"); args.Add("image2");
@@ -212,6 +250,7 @@ public sealed class FFmpegVideoExporter : IVideoExporter
 
         if (seqInfos.Count > 0)
         {
+            double frameDurSec = fps > 0 ? 1.0 / fps : 1.0 / 30.0;
             var sb = new StringBuilder();
             string lastLabel = "0:v";
             for (int i = 0; i < seqInfos.Count; i++)
@@ -220,23 +259,20 @@ public sealed class FFmpegVideoExporter : IVideoExporter
                 double startSec = inst.StartMs / 1000.0;
                 double endSec   = (inst.StartMs + inst.DurationMs) / 1000.0;
                 string startStr = startSec.ToString("0.######", inv);
-                string endStr   = endSec.ToString("0.######", inv);
 
-                // setpts=PTS+startSec/TB shifts the image sequence's PTS so frame 0
-                // lands at startSec in the timeline.  TB for image2 at fps N is 1/N,
-                // so PTS+startSec/TB = PTS + startSec*fps (integer PTS units).
-                string ovLabel  = $"ov{i}";
+                // Extend the enable window end by one extra frame so the final
+                // exit-animation frame (which is fully off-screen) is not clipped.
+                double enableEnd = endSec + frameDurSec + 0.001;
+                string enableEndStr = enableEnd.ToString("0.######", inv);
+
                 string outLabel = $"v{i + 1}";
 
-                // Shift the sequence PTS to start at the instance's start time.
-                sb.Append('[').Append(i + 1).Append($":v]setpts=PTS+{startStr}/TB[{ovLabel}];");
-
-                // Overlay: position baked into PNG so x=0:y=0.
-                // repeatlast=0 — after the last sequence frame stop showing it.
+                // No setpts — timing is baked into the padded frame sequence.
+                // repeatlast=0: after the last overlay frame stop showing it.
                 // enable guards the overlay window so it is hidden outside the instance.
-                sb.Append('[').Append(lastLabel).Append("][").Append(ovLabel).Append(']')
+                sb.Append('[').Append(lastLabel).Append("][").Append(i + 1).Append(":v]")
                   .Append("overlay=x=0:y=0:format=auto:repeatlast=0")
-                  .Append(":enable='between(t,").Append(startStr).Append(',').Append(endStr).Append(")'")
+                  .Append(":enable='between(t,").Append(startStr).Append(',').Append(enableEndStr).Append(")'")
                   .Append('[').Append(outLabel).Append("];");
 
                 lastLabel = outLabel;
