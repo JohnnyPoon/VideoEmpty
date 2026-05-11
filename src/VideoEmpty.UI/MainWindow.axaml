@@ -265,12 +265,19 @@
                             <TextBlock Grid.Row="3" Text="Center Y"/>    <TextBox Grid.Row="3" Grid.Column="1" x:Name="InstanceYBox"/>
                         </Grid>
                         <TextBlock Text="Text rows (mapped to template text elements)" FontSize="11" Foreground="Gray"/>
-                        <ListBox x:Name="InstanceTextFieldsList" MaxHeight="160">
+                        <ListBox x:Name="InstanceTextFieldsList" MaxHeight="200"
+                                 KeyboardNavigation.TabNavigation="Continue">
+                            <ListBox.ItemsPanel>
+                                <ItemsPanelTemplate>
+                                    <StackPanel/>
+                                </ItemsPanelTemplate>
+                            </ListBox.ItemsPanel>
                             <ListBox.ItemTemplate>
                                 <DataTemplate DataType="local:InstanceTextFieldItem">
-                                    <Grid ColumnDefinitions="90,*" RowDefinitions="Auto" Margin="0,2">
+                                    <Grid ColumnDefinitions="60,*" RowDefinitions="Auto" Margin="0,2">
                                         <TextBlock Text="{Binding Label}" VerticalAlignment="Center" FontSize="11" Foreground="Gray"/>
                                         <TextBox Grid.Column="1"
+                                                 Tag="{Binding ElementId}"
                                                  Text="{Binding Value}"
                                                  AcceptsReturn="True"
                                                  MinHeight="44"

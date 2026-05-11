@@ -580,6 +580,7 @@ public partial class MainWindow : Window
         var i = _project.Instances.FirstOrDefault(x => x.Id == _instanceEditorInstanceId);
         if (i is null) return;
 
+        var prevStart = i.StartMs;
         var req = new UpdateInstanceRequest(
             i.Id,
             double.TryParse(InstanceXBox.Text, out var x) ? x : null,
@@ -589,7 +590,12 @@ public partial class MainWindow : Window
             InstanceTextFields.ToDictionary(t => t.ElementId, t => t.Value ?? string.Empty),
             null);
         _api.UpdateInstance(_project, req);
-        RefreshInstances(i.Id);
+
+        // Only rebuild the instance ListBox when something visible there changed
+        // (StartMs affects ordering + time label). Otherwise skip the refresh so the
+        // currently focused text field keeps focus during typing.
+        if (i.StartMs != prevStart) RefreshInstances(i.Id);
+
         await AutoSaveAsync(reason);
         await RefreshPreviewAsync();
     }
@@ -602,38 +608,52 @@ public partial class MainWindow : Window
     private void OnInstanceTextFieldKeyDown(object? sender, KeyEventArgs e)
     {
         if (sender is not TextBox current || e.Key != Key.Tab) return;
+        if (current.Tag is not string currentId) return;
 
-        var boxes = InstanceTextFieldsList
-            .GetVisualDescendants()
-            .OfType<TextBox>()
-            .Where(tb => tb.IsVisible && tb.IsEffectivelyEnabled)
-            .OrderBy(tb => tb.Bounds.Y)
-            .ThenBy(tb => tb.Bounds.X)
-            .ToList();
-        var index = boxes.IndexOf(current);
+        var ids = InstanceTextFields.Select(f => f.ElementId).ToList();
+        var index = ids.IndexOf(currentId);
         if (index < 0) return;
 
         var delta = e.KeyModifiers.HasFlag(KeyModifiers.Shift) ? -1 : 1;
         var nextIndex = index + delta;
-        if (nextIndex < 0 || nextIndex >= boxes.Count) return;
+        if (nextIndex < 0 || nextIndex >= ids.Count) return;
 
         e.Handled = true;
-        var next = boxes[nextIndex];
-        next.Focus();
-        next.SelectAll();
+        var nextId = ids[nextIndex];
+        var nextBox = FindInstanceTextBoxById(nextId);
+        if (nextBox is null) return;
+        nextBox.Focus();
+        nextBox.SelectAll();
     }
+
+    private TextBox? FindInstanceTextBoxById(string elementId) =>
+        InstanceTextFieldsList
+            .GetVisualDescendants()
+            .OfType<TextBox>()
+            .FirstOrDefault(tb => tb.Tag is string id && id == elementId);
 
     private void FocusFirstInstanceTextFieldForReplace()
     {
+        if (InstanceTextFields.Count == 0) return;
+        var firstId = InstanceTextFields[0].ElementId;
+        // Retry across UI passes — the ListBox may not yet have realized its item
+        // containers right after the instance was added.
+        TryFocusInstanceTextBox(firstId, attemptsRemaining: 8);
+    }
+
+    private void TryFocusInstanceTextBox(string elementId, int attemptsRemaining)
+    {
         Dispatcher.UIThread.Post(() =>
         {
-            var firstTextBox = InstanceTextFieldsList
-                .GetVisualDescendants()
-                .OfType<TextBox>()
-                .FirstOrDefault();
-            if (firstTextBox is null) return;
-            firstTextBox.Focus();
-            firstTextBox.SelectAll();
+            var box = FindInstanceTextBoxById(elementId);
+            if (box is not null)
+            {
+                box.Focus();
+                box.SelectAll();
+                return;
+            }
+            if (attemptsRemaining > 0)
+                TryFocusInstanceTextBox(elementId, attemptsRemaining - 1);
         }, DispatcherPriority.Background);
     }
 
