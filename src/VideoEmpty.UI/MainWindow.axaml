@@ -95,7 +95,7 @@
                 </StackPanel>
             </Border>
 
-            <Grid x:Name="MainEditorGrid" ColumnDefinitions="360,*,340">
+            <Grid x:Name="MainEditorGrid" ColumnDefinitions="360,Auto,*,Auto,340">
                 <Border x:Name="LeftTemplatePanel" Grid.Column="0" BorderBrush="#444" BorderThickness="0,0,1,0" Padding="6">
                     <DockPanel>
                         <TextBlock DockPanel.Dock="Top" Text="Templates" FontWeight="Bold" Margin="0,0,0,6"/>
@@ -255,7 +255,9 @@
                     </DockPanel>
                 </Border>
 
-                <DockPanel Grid.Column="1" Margin="6">
+                <GridSplitter Grid.Column="1" Width="4" Background="#333" Cursor="SizeWestEast"/>
+
+                <DockPanel Grid.Column="2" Margin="6">
                     <StackPanel DockPanel.Dock="Bottom" Spacing="4" Margin="0,4,0,0">
                         <Slider x:Name="TimeSlider" Minimum="0" Maximum="1" Value="0"/>
                         <StackPanel Orientation="Horizontal" Spacing="6" HorizontalAlignment="Center">
@@ -275,7 +277,9 @@
                     </Border>
                 </DockPanel>
 
-                <DockPanel x:Name="RightPropertiesPanel" Grid.Column="2" Margin="6">
+                <GridSplitter Grid.Column="3" Width="4" Background="#333" Cursor="SizeWestEast"/>
+
+                <DockPanel x:Name="RightPropertiesPanel" Grid.Column="4" Margin="6">
                     <TextBlock DockPanel.Dock="Top" Text="Instances" FontWeight="Bold"/>
                     <StackPanel x:Name="InstanceEditor" DockPanel.Dock="Bottom" Spacing="4" IsVisible="False" Margin="0,8,0,0">
                         <TextBlock Text="Selected instance" FontWeight="Bold"/>

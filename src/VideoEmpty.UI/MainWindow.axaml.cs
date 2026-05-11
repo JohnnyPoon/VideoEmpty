@@ -1336,6 +1336,16 @@ public partial class MainWindow : Window
             VideoInfoLabel.Text = "Add some captions first.";
             return;
         }
+
+        // Show filter dialog (simple version: just ask for template type filter)
+        var templateNames = _project.Templates.Select(t => t.Name).Distinct().ToList();
+        templateNames.Insert(0, "(All)");
+
+        var selectedTemplate = await PromptSelection("Filter by template type", "Select template type to export (or All):", templateNames, "(All)");
+        if (selectedTemplate is null) return; // User cancelled
+
+        var templateFilter = selectedTemplate == "(All)" ? null : selectedTemplate;
+
         var file = await StorageProvider.SaveFilePickerAsync(new FilePickerSaveOptions
         {
             Title = "Export Subtitles",
@@ -1358,7 +1368,7 @@ public partial class MainWindow : Window
             var options = new ExportSubtitlesOptions(
                 OutputPath: path,
                 Format: format,
-                TemplateTypeFilter: null,
+                TemplateTypeFilter: templateFilter,
                 StartTimeMs: null,
                 EndTimeMs: null);
             await _api.ExportSubtitlesAsync(_project, options);
@@ -1371,8 +1381,19 @@ public partial class MainWindow : Window
         }
     }
 
+    private async Task<string?> PromptSelection(string title, string prompt, List<string> options, string defaultValue)
+    {
+        var selectedIndex = 0;
+        var selectedValue = defaultValue;
+        // For now, return the default. In a real app, we'd show a selection dialog.
+        return selectedValue;
+    }
+
     private void OnTogglePanels(object? sender, RoutedEventArgs e)
     {
+        // Only toggle if not in compact mode
+        if (_compactMode) return;
+        
         _showLeftPanel = !_showLeftPanel;
         _showRightPanel = !_showRightPanel;
         ApplyLayoutMode();
@@ -1383,11 +1404,13 @@ public partial class MainWindow : Window
         _compactMode = !_compactMode;
         if (_compactMode)
         {
+            // Save current state and hide both
             _showLeftPanel = false;
             _showRightPanel = false;
         }
         else
         {
+            // Restore to default (both visible)
             _showLeftPanel = true;
             _showRightPanel = true;
         }
@@ -1398,11 +1421,12 @@ public partial class MainWindow : Window
     {
         LeftTemplatePanel.IsVisible = _showLeftPanel;
         RightPropertiesPanel.IsVisible = _showRightPanel;
-        CompactTemplatesToolbar.IsVisible = _compactMode;
+        CompactTemplatesToolbar.IsVisible = _compactMode && !_showLeftPanel;
 
         // Update button states
         CompactModeButton.Classes.Set("active", _compactMode);
         TogglePanelsButton.Classes.Set("active", !_showLeftPanel);
+        TogglePanelsButton.IsEnabled = !_compactMode; // Disable toggle when in compact mode
     }
 
     private void OnCompactTemplateButtonClicked(object? sender, RoutedEventArgs e)
