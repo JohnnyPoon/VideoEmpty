@@ -11,10 +11,11 @@ namespace VideoEmpty.Rendering.Export;
 
 /// <summary>
 /// Exports the project by pre-rendering every animation frame as a full-resolution
-/// transparent PNG (position baked in via SkiaSharp), then overlaying the sequences onto
-/// the source video with FFmpeg. This produces butter-smooth animation because position
-/// math is done in C# rather than evaluated per-frame inside FFmpeg's filter engine.
-/// Sound effects are mixed via amix+adelay (future work).
+/// transparent PNG (position baked in via SkiaSharp), then compositing the sequences
+/// onto the source video with FFmpeg. PTS alignment is done via <c>setpts</c> inside
+/// the filter_complex rather than <c>-itsoffset</c>, which is unreliable with image2
+/// inputs on some FFmpeg builds. <c>-shortest</c> is intentionally omitted so the
+/// source video, not an image sequence, determines the output duration.
 /// </summary>
 public sealed class FFmpegVideoExporter : IVideoExporter
 {
@@ -184,8 +185,12 @@ public sealed class FFmpegVideoExporter : IVideoExporter
 
     /// <summary>
     /// Builds FFmpeg args using pre-rendered per-frame PNG sequences.
-    /// Each sequence is offset via -itsoffset so its frames align with the correct video timestamps.
-    /// Position is baked into every PNG, so overlay uses x=0:y=0.
+    /// Position is baked into every PNG (x=0:y=0 in overlay).
+    /// PTS is shifted inside the filter_complex via setpts so FFmpeg's image2
+    /// demuxer (which always starts at PTS=0) is reliable across all platforms.
+    /// NOTE: -shortest is intentionally omitted — the source video determines the
+    /// output duration. -itsoffset is avoided because it mis-aligns image2 inputs
+    /// in the filter graph on some FFmpeg builds.
     /// </summary>
     internal static List<string> BuildExportArgsFromSequences(
         Project project, ExportOptions options,
@@ -195,11 +200,12 @@ public sealed class FFmpegVideoExporter : IVideoExporter
         var inv = CultureInfo.InvariantCulture;
         var args = new List<string> { "-y", "-i", project.VideoPath! };
 
-        foreach (var (dir, _, inst) in seqInfos)
+        // Add every image-sequence input at natural PTS (0-based).
+        // PTS offsetting is handled by setpts inside the filter graph, which is
+        // guaranteed to be applied after demuxing and is independent of -itsoffset quirks.
+        foreach (var (dir, _, _) in seqInfos)
         {
-            double startSec = inst.StartMs / 1000.0;
-            // -itsoffset shifts PTS of the following input so frame 0 starts at startSec.
-            args.Add("-itsoffset"); args.Add(startSec.ToString("0.######", inv));
+            args.Add("-f"); args.Add("image2");
             args.Add("-framerate"); args.Add(fps.ToString("0.###", inv));
             args.Add("-i"); args.Add(Path.Combine(dir, "frame_%06d.png"));
         }
@@ -212,13 +218,27 @@ public sealed class FFmpegVideoExporter : IVideoExporter
             {
                 var inst = seqInfos[i].inst;
                 double startSec = inst.StartMs / 1000.0;
-                double endSec = (inst.StartMs + inst.DurationMs) / 1000.0;
-                string enable = $"between(t,{startSec.ToString("0.######", inv)},{endSec.ToString("0.######", inv)})";
+                double endSec   = (inst.StartMs + inst.DurationMs) / 1000.0;
+                string startStr = startSec.ToString("0.######", inv);
+                string endStr   = endSec.ToString("0.######", inv);
+
+                // setpts=PTS+startSec/TB shifts the image sequence's PTS so frame 0
+                // lands at startSec in the timeline.  TB for image2 at fps N is 1/N,
+                // so PTS+startSec/TB = PTS + startSec*fps (integer PTS units).
+                string ovLabel  = $"ov{i}";
                 string outLabel = $"v{i + 1}";
-                // Input index i+1 because input 0 is the source video.
-                sb.Append('[').Append(lastLabel).Append("][").Append(i + 1).Append(":v]")
-                  .Append("overlay=x=0:y=0:format=auto:repeatlast=0:enable='")
-                  .Append(enable).Append("'[").Append(outLabel).Append("];");
+
+                // Shift the sequence PTS to start at the instance's start time.
+                sb.Append('[').Append(i + 1).Append($":v]setpts=PTS+{startStr}/TB[{ovLabel}];");
+
+                // Overlay: position baked into PNG so x=0:y=0.
+                // repeatlast=0 — after the last sequence frame stop showing it.
+                // enable guards the overlay window so it is hidden outside the instance.
+                sb.Append('[').Append(lastLabel).Append("][").Append(ovLabel).Append(']')
+                  .Append("overlay=x=0:y=0:format=auto:repeatlast=0")
+                  .Append(":enable='between(t,").Append(startStr).Append(',').Append(endStr).Append(")'")
+                  .Append('[').Append(outLabel).Append("];");
+
                 lastLabel = outLabel;
             }
             if (sb.Length > 0 && sb[^1] == ';') sb.Length -= 1;
@@ -235,7 +255,8 @@ public sealed class FFmpegVideoExporter : IVideoExporter
         if (options.VideoBitrateKbps is { } br) { args.Add("-b:v"); args.Add($"{br}k"); }
         args.Add("-c:a"); args.Add(options.AudioCodec);
         args.Add("-pix_fmt"); args.Add("yuv420p");
-        args.Add("-shortest");
+        // Do NOT add -shortest: it would end the video when the first image sequence ends,
+        // cutting the output to only the duration of that sequence.
         args.Add(options.OutputPath);
         return args;
     }
