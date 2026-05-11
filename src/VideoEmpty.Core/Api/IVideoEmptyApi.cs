@@ -1,3 +1,4 @@
+using System.Collections.Generic;
 using VideoEmpty.Core.Model;
 
 namespace VideoEmpty.Core.Api;
@@ -32,9 +33,10 @@ public sealed record ExportOptions(
 public sealed record ExportSubtitlesOptions(
     string OutputPath,
     string Format = "srt", // "srt", "vtt", "json"
-    string? TemplateTypeFilter = null, // null = all, or "step", "comment", etc.
+    string? TemplateTypeFilter = null, // legacy: single template name substring (null = all)
     int? StartTimeMs = null,
-    int? EndTimeMs = null);
+    int? EndTimeMs = null,
+    IReadOnlyList<string>? TemplateNameFilters = null); // null/empty = all; otherwise instance template name must match one of these (exact match)
 
 public sealed record SubtitleEntry(
     int IndexOrId,

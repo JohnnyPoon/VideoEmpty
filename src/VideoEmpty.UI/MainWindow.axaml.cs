@@ -62,6 +62,7 @@ public partial class MainWindow : Window
         RecentProjectsList.ItemsSource = RecentProjects;
         ElementsList.ItemsSource = ElementsListItems;
         InstanceTextFieldsList.ItemsSource = InstanceTextFields;
+        CompactOverlayFieldsList.ItemsSource = InstanceTextFields;
         TemplateEnterBox.ItemsSource = Enum.GetValues<AnimationStyle>();
         TemplateExitBox.ItemsSource = Enum.GetValues<AnimationStyle>();
         ShapeKindBox.ItemsSource = Enum.GetValues<ShapeKind>();
@@ -77,6 +78,12 @@ public partial class MainWindow : Window
         ExportSubtitlesButton.Click += OnExportSubtitles;
         TogglePanelsButton.Click += OnTogglePanels;
         CompactModeButton.Click += OnToggleCompactMode;
+        CollapseLeftButton.Click += OnCollapseLeft;
+        CollapseRightButton.Click += OnCollapseRight;
+        ExpandLeftEdgeButton.Click += OnExpandLeftEdge;
+        ExpandRightEdgeButton.Click += OnExpandRightEdge;
+        CompactOverlayCloseButton.Click += OnCompactOverlayClose;
+        CompactOverlayExpandButton.Click += OnCompactOverlayExpand;
         InstallDepsButton.Click += OnInstallDeps;
         OpenLogButton.Click += (_, _) => OpenInShell(Log.LogPath);
 
@@ -156,6 +163,7 @@ public partial class MainWindow : Window
             UpdateInstanceEditor();
             DashboardRoot.IsVisible = showDashboard;
             EditorRoot.IsVisible = !showDashboard;
+            ApplyLayoutMode();
             _ = RefreshPreviewAsync();
         }
         finally
@@ -169,6 +177,7 @@ public partial class MainWindow : Window
         LoadRecentProjects();
         DashboardRoot.IsVisible = true;
         EditorRoot.IsVisible = false;
+        ApplyLayoutMode();
     }
 
     private async void OnNewProject(object? sender, RoutedEventArgs e)
@@ -523,7 +532,14 @@ public partial class MainWindow : Window
         var inst = _api.AddInstance(_project, new AddInstanceRequest(template.Id, placement.centerX, placement.centerY, _currentTimeMs, null, values, placement.animationOverride));
         RefreshInstances(inst.Id);
         InstancesList.SelectedItem = Instances.FirstOrDefault(item => item.Instance.Id == inst.Id);
-        FocusFirstInstanceTextFieldForReplace();
+        if (_compactMode)
+        {
+            ShowCompactOverlayForCurrentInstance(template);
+        }
+        else
+        {
+            FocusFirstInstanceTextFieldForReplace();
+        }
         await RefreshPreviewAsync();
         await AutoSaveAsync("add-instance");
     }
@@ -1339,14 +1355,24 @@ public partial class MainWindow : Window
             return;
         }
 
-        // Show filter dialog (simple version: just ask for template type filter)
+        // Show filter dialog: multi-select template names (or "All" by leaving none ticked)
         var templateNames = _project.Templates.Select(t => t.Name).Distinct().ToList();
-        templateNames.Insert(0, "(All)");
+        if (templateNames.Count == 0)
+        {
+            VideoInfoLabel.Text = "No templates available.";
+            return;
+        }
 
-        var selectedTemplate = await PromptSelection("Filter by template type", "Select template type to export (or All):", templateNames, "(All)");
-        if (selectedTemplate is null) return; // User cancelled
+        var (cancelled, selectedTemplates) = await PromptMultiSelection(
+            "Filter by template",
+            "Tick templates to include (leave all unchecked to include every template):",
+            templateNames);
+        if (cancelled) return;
 
-        var templateFilter = selectedTemplate == "(All)" ? null : selectedTemplate;
+        IReadOnlyList<string>? templateFilters =
+            selectedTemplates.Count == 0 || selectedTemplates.Count == templateNames.Count
+                ? null
+                : selectedTemplates;
 
         var file = await StorageProvider.SaveFilePickerAsync(new FilePickerSaveOptions
         {
@@ -1370,9 +1396,10 @@ public partial class MainWindow : Window
             var options = new ExportSubtitlesOptions(
                 OutputPath: path,
                 Format: format,
-                TemplateTypeFilter: templateFilter,
+                TemplateTypeFilter: null,
                 StartTimeMs: null,
-                EndTimeMs: null);
+                EndTimeMs: null,
+                TemplateNameFilters: templateFilters);
             await _api.ExportSubtitlesAsync(_project, options);
             ExportStatus.Text = $"Subtitles exported → {Path.GetFileName(path)}";
         }
@@ -1383,40 +1410,52 @@ public partial class MainWindow : Window
         }
     }
 
-    private async Task<string?> PromptSelection(string title, string prompt, List<string> options, string defaultValue)
+    private async Task<(bool cancelled, List<string> selected)> PromptMultiSelection(string title, string prompt, List<string> options)
     {
         var dialog = new Window
         {
             Title = title,
-            Width = 400,
-            Height = 200,
+            Width = 420,
             CanResize = false,
             WindowStartupLocation = WindowStartupLocation.CenterOwner,
-            SizeToContent = SizeToContent.WidthAndHeight
+            SizeToContent = SizeToContent.Height
         };
 
-        string? selectedValue = defaultValue;
+        var cancelled = true;
+        var checkBoxes = options.Select(opt => new CheckBox { Content = opt, IsChecked = true, Margin = new(0, 2) }).ToList();
 
         var grid = new Grid
         {
             ColumnDefinitions = new("*"),
-            RowDefinitions = new("Auto,*,Auto"),
+            RowDefinitions = new("Auto,Auto,*,Auto"),
             Margin = new(16),
-            RowSpacing = 12
+            RowSpacing = 10
         };
 
         var promptLabel = new TextBlock { Text = prompt, TextWrapping = AvaloniaMedia.TextWrapping.Wrap };
         Grid.SetRow(promptLabel, 0);
         grid.Children.Add(promptLabel);
 
-        var comboBox = new ComboBox
+        var selectionButtons = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 6 };
+        var selectAllBtn = new Button { Content = "Select All" };
+        var selectNoneBtn = new Button { Content = "Select None" };
+        selectAllBtn.Click += (_, _) => { foreach (var cb in checkBoxes) cb.IsChecked = true; };
+        selectNoneBtn.Click += (_, _) => { foreach (var cb in checkBoxes) cb.IsChecked = false; };
+        selectionButtons.Children.Add(selectAllBtn);
+        selectionButtons.Children.Add(selectNoneBtn);
+        Grid.SetRow(selectionButtons, 1);
+        grid.Children.Add(selectionButtons);
+
+        var listPanel = new StackPanel();
+        foreach (var cb in checkBoxes) listPanel.Children.Add(cb);
+        var scroller = new ScrollViewer
         {
-            ItemsSource = options,
-            SelectedItem = defaultValue,
-            HorizontalAlignment = HorizontalAlignment.Stretch
+            Content = listPanel,
+            MaxHeight = 320,
+            VerticalScrollBarVisibility = Avalonia.Controls.Primitives.ScrollBarVisibility.Auto
         };
-        Grid.SetRow(comboBox, 1);
-        grid.Children.Add(comboBox);
+        Grid.SetRow(scroller, 2);
+        grid.Children.Add(scroller);
 
         var buttonPanel = new StackPanel
         {
@@ -1424,39 +1463,36 @@ public partial class MainWindow : Window
             Spacing = 8,
             HorizontalAlignment = HorizontalAlignment.Right
         };
-
-        var okButton = new Button { Content = "OK", Width = 80 };
-        okButton.Click += (_, _) =>
-        {
-            selectedValue = comboBox.SelectedItem as string;
-            dialog.Close();
-        };
+        var okButton = new Button { Content = "OK", Width = 80, IsDefault = true };
+        okButton.Click += (_, _) => { cancelled = false; dialog.Close(); };
         buttonPanel.Children.Add(okButton);
-
-        var cancelButton = new Button { Content = "Cancel", Width = 80 };
-        cancelButton.Click += (_, _) =>
-        {
-            selectedValue = null;
-            dialog.Close();
-        };
+        var cancelButton = new Button { Content = "Cancel", Width = 80, IsCancel = true };
+        cancelButton.Click += (_, _) => { cancelled = true; dialog.Close(); };
         buttonPanel.Children.Add(cancelButton);
-
-        Grid.SetRow(buttonPanel, 2);
+        Grid.SetRow(buttonPanel, 3);
         grid.Children.Add(buttonPanel);
 
         dialog.Content = grid;
-
         await dialog.ShowDialog(this);
-        return selectedValue;
+
+        var selected = checkBoxes.Where(cb => cb.IsChecked == true).Select(cb => (string)cb.Content!).ToList();
+        return (cancelled, selected);
     }
 
     private void OnTogglePanels(object? sender, RoutedEventArgs e)
     {
-        // Only toggle if not in compact mode
-        if (_compactMode) return;
-        
-        _showLeftPanel = !_showLeftPanel;
-        _showRightPanel = !_showRightPanel;
+        // Toggle: if either panel is hidden, show both; otherwise hide both.
+        if (_compactMode)
+        {
+            // In compact mode: cycle left visibility (right stays hidden)
+            _showLeftPanel = !_showLeftPanel;
+        }
+        else
+        {
+            var anyHidden = !_showLeftPanel || !_showRightPanel;
+            _showLeftPanel = anyHidden;
+            _showRightPanel = anyHidden;
+        }
         ApplyLayoutMode();
     }
 
@@ -1465,29 +1501,144 @@ public partial class MainWindow : Window
         _compactMode = !_compactMode;
         if (_compactMode)
         {
-            // Save current state and hide both
             _showLeftPanel = false;
             _showRightPanel = false;
         }
         else
         {
-            // Restore to default (both visible)
             _showLeftPanel = true;
             _showRightPanel = true;
+            HideCompactOverlay();
         }
+        ApplyLayoutMode();
+    }
+
+    private void OnCollapseLeft(object? sender, RoutedEventArgs e)
+    {
+        _showLeftPanel = false;
+        ApplyLayoutMode();
+    }
+
+    private void OnCollapseRight(object? sender, RoutedEventArgs e)
+    {
+        _showRightPanel = false;
+        ApplyLayoutMode();
+    }
+
+    private void OnExpandLeftEdge(object? sender, RoutedEventArgs e)
+    {
+        _showLeftPanel = true;
+        ApplyLayoutMode();
+    }
+
+    private void OnExpandRightEdge(object? sender, RoutedEventArgs e)
+    {
+        _showRightPanel = true;
         ApplyLayoutMode();
     }
 
     private void ApplyLayoutMode()
     {
+        // Actually shrink the columns so the central video preview expands.
+        // Column 0 = LeftTemplatePanel, 1 = splitter, 3 = splitter, 4 = RightPropertiesPanel.
+        var cols = MainEditorGrid.ColumnDefinitions;
+        cols[0].Width = _showLeftPanel ? new GridLength(360) : new GridLength(0);
+        cols[1].Width = _showLeftPanel ? GridLength.Auto : new GridLength(0);
+        cols[3].Width = _showRightPanel ? GridLength.Auto : new GridLength(0);
+        cols[4].Width = _showRightPanel ? new GridLength(340) : new GridLength(0);
+
         LeftTemplatePanel.IsVisible = _showLeftPanel;
         RightPropertiesPanel.IsVisible = _showRightPanel;
+
+        // Edge re-expand tabs are visible only inside the editor and only when the
+        // adjacent panel is collapsed.
+        var inEditor = EditorRoot.IsVisible;
+        ExpandLeftEdgeButton.IsVisible = inEditor && !_showLeftPanel;
+        ExpandRightEdgeButton.IsVisible = inEditor && !_showRightPanel;
+
         CompactTemplatesToolbar.IsVisible = _compactMode && !_showLeftPanel;
 
-        // Update button states
         CompactModeButton.Classes.Set("active", _compactMode);
-        TogglePanelsButton.Classes.Set("active", !_showLeftPanel);
-        TogglePanelsButton.IsEnabled = !_compactMode; // Disable toggle when in compact mode
+        TogglePanelsButton.Classes.Set("active", !_showLeftPanel || !_showRightPanel);
+
+        if (!_compactMode) HideCompactOverlay();
+    }
+
+    private void ShowCompactOverlayForCurrentInstance(Template template)
+    {
+        if (InstanceTextFields.Count == 0)
+        {
+            HideCompactOverlay();
+            return;
+        }
+        CompactOverlayTitle.Text = $"{template.Name} — enter caption text";
+        CompactInstanceOverlay.IsVisible = true;
+        // Focus the first text box once the ListBox realizes its containers.
+        TryFocusCompactOverlayTextBox(InstanceTextFields[0].ElementId, attemptsRemaining: 8);
+    }
+
+    private void HideCompactOverlay()
+    {
+        CompactInstanceOverlay.IsVisible = false;
+    }
+
+    private void OnCompactOverlayClose(object? sender, RoutedEventArgs e) => HideCompactOverlay();
+
+    private void OnCompactOverlayExpand(object? sender, RoutedEventArgs e)
+    {
+        // Reveal full properties panel and hide the floating overlay.
+        _showRightPanel = true;
+        ApplyLayoutMode();
+        HideCompactOverlay();
+        FocusFirstInstanceTextFieldForReplace();
+    }
+
+    private TextBox? FindCompactOverlayTextBoxById(string elementId) =>
+        CompactOverlayFieldsList
+            .GetVisualDescendants()
+            .OfType<TextBox>()
+            .FirstOrDefault(tb => tb.Tag is string id && id == elementId);
+
+    private void TryFocusCompactOverlayTextBox(string elementId, int attemptsRemaining)
+    {
+        Dispatcher.UIThread.Post(() =>
+        {
+            var box = FindCompactOverlayTextBoxById(elementId);
+            if (box is not null)
+            {
+                box.Focus();
+                box.SelectAll();
+                return;
+            }
+            if (attemptsRemaining > 0)
+                TryFocusCompactOverlayTextBox(elementId, attemptsRemaining - 1);
+        }, DispatcherPriority.Background);
+    }
+
+    private async void OnCompactOverlayTextFieldLostFocus(object? sender, RoutedEventArgs e)
+    {
+        await ApplyInstanceFromEditorAsync("update-instance-text");
+    }
+
+    private void OnCompactOverlayTextFieldKeyDown(object? sender, KeyEventArgs e)
+    {
+        if (sender is not TextBox current || e.Key != Key.Tab) return;
+        if (current.Tag is not string currentId) return;
+
+        var ids = InstanceTextFields.Select(f => f.ElementId).ToList();
+        var index = ids.IndexOf(currentId);
+        if (index < 0) return;
+
+        var delta = e.KeyModifiers.HasFlag(KeyModifiers.Shift) ? -1 : 1;
+        var nextIndex = index + delta;
+        if (nextIndex < 0 || nextIndex >= ids.Count) return;
+
+        e.Handled = true;
+        var nextId = ids[nextIndex];
+        var nextBox = FindCompactOverlayTextBoxById(nextId);
+        if (nextBox is null) return;
+        nextBox.Focus();
+        nextBox.SelectAll();
     }
 
     private void OnCompactTemplateButtonClicked(object? sender, RoutedEventArgs e)

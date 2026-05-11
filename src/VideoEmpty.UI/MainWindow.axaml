@@ -98,7 +98,11 @@
             <Grid x:Name="MainEditorGrid" ColumnDefinitions="360,Auto,*,Auto,340">
                 <Border x:Name="LeftTemplatePanel" Grid.Column="0" BorderBrush="#444" BorderThickness="0,0,1,0" Padding="6">
                     <DockPanel>
-                        <TextBlock DockPanel.Dock="Top" Text="Templates" FontWeight="Bold" Margin="0,0,0,6"/>
+                        <Grid DockPanel.Dock="Top" ColumnDefinitions="*,Auto" Margin="0,0,0,6">
+                            <TextBlock Text="Templates" FontWeight="Bold" VerticalAlignment="Center"/>
+                            <Button Grid.Column="1" x:Name="CollapseLeftButton" Classes="icon-btn"
+                                    Content="◄" ToolTip.Tip="Collapse this panel" Padding="6,1"/>
+                        </Grid>
                         <StackPanel DockPanel.Dock="Top" Orientation="Horizontal" Spacing="6" Margin="0,0,0,6">
                             <Button x:Name="AddTemplateButton" Content="Add"/>
                             <Button x:Name="DuplicateTemplateButton" Content="Duplicate"/>
@@ -280,7 +284,11 @@
                 <GridSplitter Grid.Column="3" Width="4" Background="#333" Cursor="SizeWestEast"/>
 
                 <DockPanel x:Name="RightPropertiesPanel" Grid.Column="4" Margin="6">
-                    <TextBlock DockPanel.Dock="Top" Text="Instances" FontWeight="Bold"/>
+                    <Grid DockPanel.Dock="Top" ColumnDefinitions="Auto,*" Margin="0,0,0,4">
+                        <Button x:Name="CollapseRightButton" Classes="icon-btn"
+                                Content="►" ToolTip.Tip="Collapse this panel" Padding="6,1"/>
+                        <TextBlock Grid.Column="1" Text="Instances" FontWeight="Bold" VerticalAlignment="Center" Margin="6,0,0,0"/>
+                    </Grid>
                     <StackPanel x:Name="InstanceEditor" DockPanel.Dock="Bottom" Spacing="4" IsVisible="False" Margin="0,8,0,0">
                         <TextBlock Text="Selected instance" FontWeight="Bold"/>
                         <TextBlock x:Name="InstanceTemplateNameLabel" FontSize="11" Foreground="Gray"/>
@@ -344,5 +352,56 @@
                 </DockPanel>
             </Grid>
         </DockPanel>
+
+        <!-- Edge re-expand tabs (visible when a panel is collapsed) -->
+        <Button x:Name="ExpandLeftEdgeButton" IsVisible="False"
+                HorizontalAlignment="Left" VerticalAlignment="Center"
+                Width="18" Height="80" Padding="0"
+                Background="#444" Foreground="White"
+                Content="▶" FontSize="11" ToolTip.Tip="Show templates panel"/>
+        <Button x:Name="ExpandRightEdgeButton" IsVisible="False"
+                HorizontalAlignment="Right" VerticalAlignment="Center"
+                Width="18" Height="80" Padding="0"
+                Background="#444" Foreground="White"
+                Content="◀" FontSize="11" ToolTip.Tip="Show properties panel"/>
+
+        <!-- Compact-mode floating instance text-input overlay -->
+        <Border x:Name="CompactInstanceOverlay" IsVisible="False"
+                HorizontalAlignment="Right" VerticalAlignment="Top"
+                Margin="0,90,12,0" Padding="10"
+                Background="#222" BorderBrush="#666" BorderThickness="1"
+                MinWidth="320" MaxWidth="420">
+            <DockPanel>
+                <Grid DockPanel.Dock="Top" ColumnDefinitions="*,Auto,Auto" Margin="0,0,0,6">
+                    <TextBlock x:Name="CompactOverlayTitle" Text="New caption" FontWeight="Bold" Foreground="White" VerticalAlignment="Center"/>
+                    <Button Grid.Column="1" x:Name="CompactOverlayExpandButton" Classes="icon-btn"
+                            Content="⛶" ToolTip.Tip="Show full properties panel" Padding="6,1"/>
+                    <Button Grid.Column="2" x:Name="CompactOverlayCloseButton" Classes="icon-btn"
+                            Content="✕" ToolTip.Tip="Close" Padding="6,1" Margin="2,0,0,0"/>
+                </Grid>
+                <ListBox x:Name="CompactOverlayFieldsList" Background="Transparent"
+                         KeyboardNavigation.TabNavigation="Continue" MaxHeight="320">
+                    <ListBox.ItemsPanel>
+                        <ItemsPanelTemplate>
+                            <StackPanel/>
+                        </ItemsPanelTemplate>
+                    </ListBox.ItemsPanel>
+                    <ListBox.ItemTemplate>
+                        <DataTemplate DataType="local:InstanceTextFieldItem">
+                            <Grid ColumnDefinitions="60,*" RowDefinitions="Auto" Margin="0,3">
+                                <TextBlock Text="{Binding Label}" VerticalAlignment="Center" FontSize="11" Foreground="#bbb"/>
+                                <TextBox Grid.Column="1"
+                                         Tag="{Binding ElementId}"
+                                         Text="{Binding Value}"
+                                         AcceptsReturn="True"
+                                         MinHeight="44"
+                                         KeyDown="OnCompactOverlayTextFieldKeyDown"
+                                         LostFocus="OnCompactOverlayTextFieldLostFocus"/>
+                            </Grid>
+                        </DataTemplate>
+                    </ListBox.ItemTemplate>
+                </ListBox>
+            </DockPanel>
+        </Border>
     </Grid>
 </Window>

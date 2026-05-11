@@ -175,9 +175,14 @@ public sealed class VideoEmptyApi : IVideoEmptyApi
             var template = project.Templates.FirstOrDefault(t => t.Id == inst.TemplateId);
             if (template is null) continue;
 
-            // Filter by template type/name if requested
+            // Filter by template type/name if requested (legacy substring match)
             if (!string.IsNullOrEmpty(options.TemplateTypeFilter) &&
                 !template.Name.Contains(options.TemplateTypeFilter, StringComparison.OrdinalIgnoreCase))
+                continue;
+
+            // Filter by explicit template name list (exact match, multi-select)
+            if (options.TemplateNameFilters is { Count: > 0 } &&
+                !options.TemplateNameFilters.Any(name => string.Equals(name, template.Name, StringComparison.OrdinalIgnoreCase)))
                 continue;
 
             // Filter by time range
