@@ -10,10 +10,12 @@ using System.Threading.Tasks;
 using Avalonia.Controls;
 using Avalonia.Input;
 using Avalonia.Interactivity;
+using Avalonia.Layout;
 using Avalonia.Media.Imaging;
 using Avalonia.Platform.Storage;
 using Avalonia.Threading;
 using Avalonia.VisualTree;
+using AvaloniaMedia = Avalonia.Media;
 using VideoEmpty.Core.Api;
 using VideoEmpty.Core.Diagnostics;
 using VideoEmpty.Core.Model;
@@ -1383,9 +1385,68 @@ public partial class MainWindow : Window
 
     private async Task<string?> PromptSelection(string title, string prompt, List<string> options, string defaultValue)
     {
-        var selectedIndex = 0;
-        var selectedValue = defaultValue;
-        // For now, return the default. In a real app, we'd show a selection dialog.
+        var dialog = new Window
+        {
+            Title = title,
+            Width = 400,
+            Height = 200,
+            CanResize = false,
+            WindowStartupLocation = WindowStartupLocation.CenterOwner,
+            SizeToContent = SizeToContent.WidthAndHeight
+        };
+
+        string? selectedValue = defaultValue;
+
+        var grid = new Grid
+        {
+            ColumnDefinitions = new("*"),
+            RowDefinitions = new("Auto,*,Auto"),
+            Margin = new(16),
+            RowSpacing = 12
+        };
+
+        var promptLabel = new TextBlock { Text = prompt, TextWrapping = AvaloniaMedia.TextWrapping.Wrap };
+        Grid.SetRow(promptLabel, 0);
+        grid.Children.Add(promptLabel);
+
+        var comboBox = new ComboBox
+        {
+            ItemsSource = options,
+            SelectedItem = defaultValue,
+            HorizontalAlignment = HorizontalAlignment.Stretch
+        };
+        Grid.SetRow(comboBox, 1);
+        grid.Children.Add(comboBox);
+
+        var buttonPanel = new StackPanel
+        {
+            Orientation = Orientation.Horizontal,
+            Spacing = 8,
+            HorizontalAlignment = HorizontalAlignment.Right
+        };
+
+        var okButton = new Button { Content = "OK", Width = 80 };
+        okButton.Click += (_, _) =>
+        {
+            selectedValue = comboBox.SelectedItem as string;
+            dialog.Close();
+        };
+        buttonPanel.Children.Add(okButton);
+
+        var cancelButton = new Button { Content = "Cancel", Width = 80 };
+        cancelButton.Click += (_, _) =>
+        {
+            selectedValue = null;
+            dialog.Close();
+        };
+        buttonPanel.Children.Add(cancelButton);
+
+        Grid.SetRow(buttonPanel, 2);
+        grid.Children.Add(buttonPanel);
+
+        dialog.Content = grid;
+
+        await dialog.ShowDialog(this);
         return selectedValue;
     }
 
