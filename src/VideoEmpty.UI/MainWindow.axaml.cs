@@ -12,6 +12,7 @@ using Avalonia.Interactivity;
 using Avalonia.Media.Imaging;
 using Avalonia.Platform.Storage;
 using Avalonia.Threading;
+using Avalonia.VisualTree;
 using VideoEmpty.Core.Api;
 using VideoEmpty.Core.Diagnostics;
 using VideoEmpty.Core.Model;
@@ -499,6 +500,7 @@ public partial class MainWindow : Window
         var inst = _api.AddInstance(_project, new AddInstanceRequest(template.Id, placement.centerX, placement.centerY, _currentTimeMs, null, values, placement.animationOverride));
         RefreshInstances(inst.Id);
         InstancesList.SelectedItem = Instances.FirstOrDefault(item => item.Instance.Id == inst.Id);
+        FocusFirstInstanceTextFieldForReplace();
         await RefreshPreviewAsync();
         await AutoSaveAsync("add-instance");
     }
@@ -536,12 +538,13 @@ public partial class MainWindow : Window
             InstanceTextFields.Clear();
             if (template is not null)
             {
+                int row = 1;
                 foreach (var te in template.Elements.OfType<TextElement>())
                 {
                     InstanceTextFields.Add(new InstanceTextFieldItem
                     {
                         ElementId = te.Id,
-                        Label = te.Id,
+                        Label = $"Row {row++}",
                         Value = i.TextValues.TryGetValue(te.Id, out var v) ? v : te.DefaultText
                     });
                 }
@@ -594,6 +597,20 @@ public partial class MainWindow : Window
     private async void OnInstanceTextFieldLostFocus(object? sender, RoutedEventArgs e)
     {
         await ApplyInstanceFromEditorAsync("update-instance-text");
+    }
+
+    private void FocusFirstInstanceTextFieldForReplace()
+    {
+        Dispatcher.UIThread.Post(() =>
+        {
+            var firstTextBox = InstanceTextFieldsList
+                .GetVisualDescendants()
+                .OfType<TextBox>()
+                .FirstOrDefault();
+            if (firstTextBox is null) return;
+            firstTextBox.Focus();
+            firstTextBox.SelectAll();
+        }, DispatcherPriority.Background);
     }
 
     private void UpdateTemplateEditor()
