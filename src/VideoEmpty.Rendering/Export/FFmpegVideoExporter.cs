@@ -252,7 +252,17 @@ public sealed class FFmpegVideoExporter : IVideoExporter
         {
             double frameDurSec = fps > 0 ? 1.0 / fps : 1.0 / 30.0;
             var sb = new StringBuilder();
-            string lastLabel = "0:v";
+            // Force the source to constant framerate before overlay.  Screen
+            // recordings are typically variable framerate (frames are dropped
+            // during periods when the screen does not change).  Without this
+            // step, the overlay filter only emits an output frame whenever the
+            // source emits one, so any animation that occurs during a static
+            // period of the source video would never be rendered.  fps=N
+            // duplicates frames during gaps and decimates during bursts so the
+            // output cadence matches the image-sequence cadence exactly.
+            sb.Append("[0:v]fps=").Append(fps.ToString("0.######", inv))
+              .Append(",setpts=PTS-STARTPTS[main];");
+            string lastLabel = "main";
             for (int i = 0; i < seqInfos.Count; i++)
             {
                 var inst = seqInfos[i].inst;
@@ -287,6 +297,11 @@ public sealed class FFmpegVideoExporter : IVideoExporter
         args.Add("-c:v"); args.Add(options.VideoCodec);
         args.Add("-progress"); args.Add("pipe:2");
         args.Add("-nostats");
+        // Force constant framerate output to match the fps filter applied at the
+        // start of the filter graph; otherwise muxers may re-introduce VFR
+        // timing from the source and animations during static periods are lost.
+        args.Add("-fps_mode"); args.Add("cfr");
+        args.Add("-r"); args.Add(fps.ToString("0.######", inv));
         if (options.Crf is { } crf) { args.Add("-crf"); args.Add(crf.ToString(CultureInfo.InvariantCulture)); }
         if (options.VideoBitrateKbps is { } br) { args.Add("-b:v"); args.Add($"{br}k"); }
         args.Add("-c:a"); args.Add(options.AudioCodec);
