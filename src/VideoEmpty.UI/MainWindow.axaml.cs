@@ -103,11 +103,7 @@ public partial class MainWindow : Window
         };
 
         PreviewImage.PointerPressed += OnPreviewClicked;
-        InstancesList.SelectionChanged += (_, _) =>
-        {
-            CommitInstanceEdit();
-            UpdateInstanceEditor();
-        };
+        InstancesList.SelectionChanged += (_, _) => UpdateInstanceEditor();
         DeleteInstanceButton.Click += OnDeleteInstance;
         PreviewInstanceButton.Click += OnPreviewInstance;
 
