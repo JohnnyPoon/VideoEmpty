@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
+using System.ComponentModel;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
@@ -424,12 +425,24 @@ public partial class MainWindow : Window
             {
                 Instance = i,
                 TemplateName = templateName,
-                TimeLabel = $"{(int)startTs.TotalMinutes}:{startTs.Seconds:00}.{startTs.Milliseconds:000}"
+                TimeLabel = $"{(int)startTs.TotalMinutes}:{startTs.Seconds:00}.{startTs.Milliseconds:000}",
+                TextPreview = BuildTextPreview(i)
             });
         }
 
         if (!string.IsNullOrWhiteSpace(preserveSelectedId))
             InstancesList.SelectedItem = Instances.FirstOrDefault(x => x.Instance.Id == preserveSelectedId);
+    }
+
+    private static string BuildTextPreview(TemplateInstance i)
+    {
+        if (i.TextValues is null || i.TextValues.Count == 0) return string.Empty;
+        var joined = string.Join(" / ",
+            i.TextValues.Values
+                .Where(v => !string.IsNullOrWhiteSpace(v))
+                .Select(v => v.Replace('\r', ' ').Replace('\n', ' ').Trim()));
+        if (joined.Length > 80) joined = joined.Substring(0, 79) + "…";
+        return joined;
     }
 
     private TemplateInstance? SelectedInstance =>
@@ -594,7 +607,16 @@ public partial class MainWindow : Window
         // Only rebuild the instance ListBox when something visible there changed
         // (StartMs affects ordering + time label). Otherwise skip the refresh so the
         // currently focused text field keeps focus during typing.
-        if (i.StartMs != prevStart) RefreshInstances(i.Id);
+        if (i.StartMs != prevStart)
+        {
+            RefreshInstances(i.Id);
+        }
+        else
+        {
+            // Live-update the preview row in place so the text snippet stays current.
+            var item = Instances.FirstOrDefault(it => it.Instance.Id == i.Id);
+            if (item is not null) item.TextPreview = BuildTextPreview(i);
+        }
 
         await AutoSaveAsync(reason);
         await RefreshPreviewAsync();
@@ -1317,11 +1339,34 @@ public partial class MainWindow : Window
 }
 
 /// <summary>Wraps a <see cref="TemplateInstance"/> with resolved display data for the instances list.</summary>
-public sealed class InstanceListItem
+public sealed class InstanceListItem : INotifyPropertyChanged
 {
+    private string _templateName = string.Empty;
+    private string _timeLabel = string.Empty;
+    private string _textPreview = string.Empty;
+
     public required TemplateInstance Instance { get; init; }
-    public required string TemplateName { get; init; }
-    public required string TimeLabel { get; init; }
+
+    public required string TemplateName
+    {
+        get => _templateName;
+        set { if (_templateName != value) { _templateName = value; OnChanged(nameof(TemplateName)); } }
+    }
+
+    public required string TimeLabel
+    {
+        get => _timeLabel;
+        set { if (_timeLabel != value) { _timeLabel = value; OnChanged(nameof(TimeLabel)); } }
+    }
+
+    public string TextPreview
+    {
+        get => _textPreview;
+        set { if (_textPreview != value) { _textPreview = value; OnChanged(nameof(TextPreview)); } }
+    }
+
+    public event PropertyChangedEventHandler? PropertyChanged;
+    private void OnChanged(string name) => PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(name));
 }
 
 /// <summary>Display model for a recent project entry on the dashboard.</summary>

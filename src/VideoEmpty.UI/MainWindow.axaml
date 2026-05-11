@@ -297,8 +297,12 @@
                             <DataTemplate DataType="local:InstanceListItem">
                                 <Grid ColumnDefinitions="*,Auto" MinHeight="30">
                                     <StackPanel Orientation="Vertical" VerticalAlignment="Center" Spacing="1">
-                                        <TextBlock Text="{Binding TimeLabel}" FontSize="12"/>
-                                        <TextBlock Text="{Binding TemplateName}" FontSize="10" Foreground="Gray"/>
+                                        <TextBlock Text="{Binding TextPreview}" FontSize="12" FontWeight="SemiBold"
+                                                   TextTrimming="CharacterEllipsis" IsVisible="{Binding TextPreview, Converter={x:Static StringConverters.IsNotNullOrEmpty}}"/>
+                                        <StackPanel Orientation="Horizontal" Spacing="6">
+                                            <TextBlock Text="{Binding TimeLabel}" FontSize="10" Foreground="Gray"/>
+                                            <TextBlock Text="{Binding TemplateName}" FontSize="10" Foreground="Gray"/>
+                                        </StackPanel>
                                     </StackPanel>
                                     <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="2"
                                                 Classes="item-actions" VerticalAlignment="Center">
