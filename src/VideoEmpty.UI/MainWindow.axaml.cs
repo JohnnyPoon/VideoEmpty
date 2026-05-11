@@ -33,7 +33,7 @@ public partial class MainWindow : Window
 
     public ObservableCollection<Template> Templates { get; } = new();
     public ObservableCollection<InstanceListItem> Instances { get; } = new();
-    public ObservableCollection<string> RecentProjects { get; } = new();
+    public ObservableCollection<RecentProjectItem> RecentProjects { get; } = new();
 
     public MainWindow()
     {
@@ -184,8 +184,8 @@ public partial class MainWindow : Window
 
     private async void OnOpenRecentProject(object? sender, RoutedEventArgs e)
     {
-        if (RecentProjectsList.SelectedItem is not string path) return;
-        await OpenProjectPathAsync(path);
+        if (RecentProjectsList.SelectedItem is not RecentProjectItem item) return;
+        await OpenProjectPathAsync(item.Path);
     }
 
     private async Task OpenProjectPathAsync(string path)
@@ -781,7 +781,27 @@ public partial class MainWindow : Window
     {
         RecentProjects.Clear();
         foreach (var path in _settings.RecentProjects.Where(File.Exists))
-            RecentProjects.Add(path);
+        {
+            RecentProjects.Add(new RecentProjectItem
+            {
+                Path = path,
+                Name = Path.GetFileNameWithoutExtension(path),
+                CreatedLabel = RelativeTime(File.GetCreationTime(path)),
+                UpdatedLabel = RelativeTime(File.GetLastWriteTime(path))
+            });
+        }
+    }
+
+    private static string RelativeTime(DateTime dt)
+    {
+        var elapsed = DateTime.Now - dt;
+        if (elapsed.TotalSeconds < 60) return "just now";
+        if (elapsed.TotalMinutes < 60) return $"{(int)elapsed.TotalMinutes} min. ago";
+        if (elapsed.TotalHours < 24) return $"{(int)elapsed.TotalHours} hr. ago";
+        if (elapsed.TotalDays < 7) return $"{(int)elapsed.TotalDays} days ago";
+        if (elapsed.TotalDays < 30) return $"{(int)(elapsed.TotalDays / 7)} wk. ago";
+        if (elapsed.TotalDays < 365) return $"{(int)(elapsed.TotalDays / 30)} mo. ago";
+        return dt.ToString("yyyy-MM-dd");
     }
 
     private void RememberRecentProject(string path)
@@ -836,4 +856,13 @@ public sealed class InstanceListItem
     public required TemplateInstance Instance { get; init; }
     public required string TemplateName { get; init; }
     public required string TimeLabel { get; init; }
+}
+
+/// <summary>Display model for a recent project entry on the dashboard.</summary>
+public sealed class RecentProjectItem
+{
+    public required string Path { get; init; }
+    public required string Name { get; init; }
+    public required string CreatedLabel { get; init; }
+    public required string UpdatedLabel { get; init; }
 }

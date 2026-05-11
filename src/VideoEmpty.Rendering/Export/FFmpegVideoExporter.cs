@@ -10,9 +10,11 @@ using VideoEmpty.Rendering.Skia;
 namespace VideoEmpty.Rendering.Export;
 
 /// <summary>
-/// Exports the project by rendering each template instance to an RGBA PNG (via Skia)
-/// and overlaying it onto the source video with FFmpeg. Slide animations are produced
-/// with per-frame overlay x/y expressions; sound effects are mixed via amix+adelay.
+/// Exports the project by pre-rendering every animation frame as a full-resolution
+/// transparent PNG (position baked in via SkiaSharp), then overlaying the sequences onto
+/// the source video with FFmpeg. This produces butter-smooth animation because position
+/// math is done in C# rather than evaluated per-frame inside FFmpeg's filter engine.
+/// Sound effects are mixed via amix+adelay (future work).
 /// </summary>
 public sealed class FFmpegVideoExporter : IVideoExporter
 {
@@ -71,22 +73,53 @@ public sealed class FFmpegVideoExporter : IVideoExporter
         {
             _bin.EnsureFFmpeg();
 
-            // 1. Render each instance template to its own PNG.
-            var pngPaths = new List<string>(project.Instances.Count);
+            double fps = project.VideoFps > 0 ? project.VideoFps : 30.0;
+            int vw = project.VideoResolution.Width > 0 ? project.VideoResolution.Width : 1920;
+            int vh = project.VideoResolution.Height > 0 ? project.VideoResolution.Height : 1080;
+
+            // 1. Pre-render every animation frame for each instance.
+            //    Each frame is a full-resolution transparent PNG with the overlay
+            //    pixel-positioned via the same math as the live preview compositor.
+            //    This produces butter-smooth animation without FFmpeg expression evaluation.
+            var seqInfos = new List<(string dir, int frameCount, TemplateInstance inst)>();
             for (int i = 0; i < project.Instances.Count; i++)
             {
-                job.Status.Message = $"Rendering overlay {i + 1}/{project.Instances.Count}";
                 var inst = project.Instances[i];
+                job.Status.Message = $"Pre-rendering animation {i + 1}/{project.Instances.Count}";
                 var template = project.Templates.FirstOrDefault(t => t.Id == inst.TemplateId)
                     ?? throw new InvalidOperationException($"Template '{inst.TemplateId}' missing.");
-                var bytes = _renderer.RenderTemplatePng(template, inst.TextValues);
-                var path = Path.Combine(work, $"ovl_{i}.png");
-                await File.WriteAllBytesAsync(path, bytes, job.Cts.Token).ConfigureAwait(false);
-                pngPaths.Add(path);
+
+                using var overlayBmp = _renderer.RenderBitmap(template, inst.TextValues);
+                var seqDir = Path.Combine(work, $"seq_{i}");
+                Directory.CreateDirectory(seqDir);
+
+                double frameDurMs = 1000.0 / fps;
+                int frameCount = 0;
+                for (double tMs = inst.StartMs; tMs <= inst.StartMs + inst.DurationMs + frameDurMs; tMs += frameDurMs)
+                {
+                    var (x, y) = PreviewCompositor.ComputePosition(template, inst, (int)tMs, vw, vh);
+
+                    // Render a full-resolution transparent canvas with the overlay drawn at
+                    // the computed pixel position for this frame's time.
+                    using var frame = new SkiaSharp.SKBitmap(vw, vh, SkiaSharp.SKColorType.Rgba8888, SkiaSharp.SKAlphaType.Premul);
+                    using (var canvas = new SkiaSharp.SKCanvas(frame))
+                    {
+                        canvas.Clear(SkiaSharp.SKColors.Transparent);
+                        using var paint = new SkiaSharp.SKPaint { IsAntialias = true };
+                        canvas.DrawBitmap(overlayBmp, x, y, paint);
+                    }
+                    using var img = SkiaSharp.SKImage.FromBitmap(frame);
+                    using var encoded = img.Encode(SkiaSharp.SKEncodedImageFormat.Png, 90);
+                    var framePath = Path.Combine(seqDir, $"frame_{frameCount:D6}.png");
+                    await File.WriteAllBytesAsync(framePath, encoded.ToArray(), job.Cts.Token).ConfigureAwait(false);
+                    frameCount++;
+                }
+
+                seqInfos.Add((seqDir, frameCount, inst));
             }
 
-            // 2. Build ffmpeg argv.
-            var args = BuildExportArgs(project, options, pngPaths);
+            // 2. Build ffmpeg argv using the pre-rendered sequences.
+            var args = BuildExportArgsFromSequences(project, options, seqInfos, fps);
             VideoEmpty.Core.Diagnostics.Log.Info("ffmpeg-export", $"{_bin.FFmpegPath} {string.Join(" ", args)}");
             job.Status.Progress = 0.1;
             job.Status.Message = "Encoding video";
@@ -149,31 +182,50 @@ public sealed class FFmpegVideoExporter : IVideoExporter
         }
     }
 
-    /// <summary>Builds the ffmpeg argv (input files + filter_complex + output).</summary>
-    internal static List<string> BuildExportArgs(Project project, ExportOptions options, List<string> overlayPngs)
+    /// <summary>
+    /// Builds FFmpeg args using pre-rendered per-frame PNG sequences.
+    /// Each sequence is offset via -itsoffset so its frames align with the correct video timestamps.
+    /// Position is baked into every PNG, so overlay uses x=0:y=0.
+    /// </summary>
+    internal static List<string> BuildExportArgsFromSequences(
+        Project project, ExportOptions options,
+        List<(string dir, int frameCount, TemplateInstance inst)> seqInfos,
+        double fps)
     {
+        var inv = CultureInfo.InvariantCulture;
         var args = new List<string> { "-y", "-i", project.VideoPath! };
-        foreach (var png in overlayPngs)
+
+        foreach (var (dir, _, inst) in seqInfos)
         {
-            // Loop image so it's available across the full video duration.
-            args.Add("-loop"); args.Add("1");
-            args.Add("-i"); args.Add(png);
+            double startSec = inst.StartMs / 1000.0;
+            // -itsoffset shifts PTS of the following input so frame 0 starts at startSec.
+            args.Add("-itsoffset"); args.Add(startSec.ToString("0.######", inv));
+            args.Add("-framerate"); args.Add(fps.ToString("0.###", inv));
+            args.Add("-i"); args.Add(Path.Combine(dir, "frame_%06d.png"));
         }
 
-        var filter = BuildFilterComplex(project, overlayPngs.Count, out var lastVideoLabel, out var lastAudioLabel);
-        if (filter.Length > 0)
+        if (seqInfos.Count > 0)
         {
-            args.Add("-filter_complex");
-            args.Add(filter);
-            args.Add("-map"); args.Add($"[{lastVideoLabel}]");
-            if (lastAudioLabel != null)
+            var sb = new StringBuilder();
+            string lastLabel = "0:v";
+            for (int i = 0; i < seqInfos.Count; i++)
             {
-                args.Add("-map"); args.Add($"[{lastAudioLabel}]");
+                var inst = seqInfos[i].inst;
+                double startSec = inst.StartMs / 1000.0;
+                double endSec = (inst.StartMs + inst.DurationMs) / 1000.0;
+                string enable = $"between(t,{startSec.ToString("0.######", inv)},{endSec.ToString("0.######", inv)})";
+                string outLabel = $"v{i + 1}";
+                // Input index i+1 because input 0 is the source video.
+                sb.Append('[').Append(lastLabel).Append("][").Append(i + 1).Append(":v]")
+                  .Append("overlay=x=0:y=0:format=auto:repeatlast=0:enable='")
+                  .Append(enable).Append("'[").Append(outLabel).Append("];");
+                lastLabel = outLabel;
             }
-            else
-            {
-                args.Add("-map"); args.Add("0:a?");
-            }
+            if (sb.Length > 0 && sb[^1] == ';') sb.Length -= 1;
+
+            args.Add("-filter_complex"); args.Add(sb.ToString());
+            args.Add("-map"); args.Add($"[{lastLabel}]");
+            args.Add("-map"); args.Add("0:a?");
         }
 
         args.Add("-c:v"); args.Add(options.VideoCodec);
@@ -207,121 +259,5 @@ public sealed class FFmpegVideoExporter : IVideoExporter
         {
             status.Progress = 1.0;
         }
-    }
-
-    private static string BuildFilterComplex(Project project, int overlayCount, out string lastVideoLabel, out string? lastAudioLabel)
-    {
-        lastVideoLabel = "0:v";
-        lastAudioLabel = null;
-        if (overlayCount == 0) return "";
-
-        var sb = new StringBuilder();
-        var inv = CultureInfo.InvariantCulture;
-        var audioOverlays = new List<string>();
-
-        for (int i = 0; i < project.Instances.Count; i++)
-        {
-            var inst = project.Instances[i];
-            var template = project.Templates.First(t => t.Id == inst.TemplateId);
-            var anim = inst.AnimationOverride ?? template.Animation;
-            int inputIndex = i + 1; // input 0 is source video
-
-            double startSec = inst.StartMs / 1000.0;
-            double endSec = (inst.StartMs + inst.DurationMs) / 1000.0;
-            double enterSec = anim.EnterMs / 1000.0;
-            double exitSec = anim.ExitMs / 1000.0;
-
-            // overlay center -> top-left
-            // x_center = W * cx, y_center = H * cy
-            // x = x_center - w/2; y = y_center - h/2
-            // Where w = template.Width, h = template.Height (overlay input dims)
-            string cxExpr = $"(main_w*{inst.Center.X.ToString("0.######", inv)})";
-            string cyExpr = $"(main_h*{inst.Center.Y.ToString("0.######", inv)})";
-            string xRestFromCenter = $"({cxExpr}-overlay_w/2)";
-            string yRestFromCenter = $"({cyExpr}-overlay_h/2)";
-            bool horizontalPlacement = IsHorizontal(anim.Enter) || IsHorizontal(anim.Exit);
-            string xRest = horizontalPlacement ? HorizontalRestXExpr(anim, xRestFromCenter) : xRestFromCenter;
-            string yRest = horizontalPlacement
-                ? $"min(max({yRestFromCenter},0),(main_h-overlay_h))"
-                : yRestFromCenter;
-
-            string xExpr = BuildAxisExpression(anim.Enter, anim.Exit,
-                                               startSec, endSec, enterSec, exitSec,
-                                               xRest, yRest, isX: true, inv);
-            string yExpr = BuildAxisExpression(anim.Enter, anim.Exit,
-                                               startSec, endSec, enterSec, exitSec,
-                                               xRest, yRest, isX: false, inv);
-
-            string enable = $"between(t,{startSec.ToString("0.######", inv)},{endSec.ToString("0.######", inv)})";
-            string outLabel = $"v{i + 1}";
-            sb.Append('[').Append(lastVideoLabel).Append("][").Append(inputIndex).Append(":v]")
-              .Append("overlay=x='").Append(xExpr).Append("':y='").Append(yExpr).Append("':enable='")
-              .Append(enable).Append("':format=auto[").Append(outLabel).Append("];");
-            lastVideoLabel = outLabel;
-        }
-
-        // Audio mixing: each instance with sounds becomes a separate input chain. For simplicity,
-        // sound files are added as additional inputs via a follow-up call; stub here keeps audio
-        // as the source's audio track. (Sound mixing is finalized in BuildExportArgs extension.)
-        // (Future: add adelay+amix.)
-
-        // Trim trailing semicolon
-        if (sb.Length > 0 && sb[^1] == ';') sb.Length -= 1;
-        return sb.ToString();
-    }
-
-    /// <summary>
-    /// Builds an FFmpeg overlay axis expression that incorporates slide-in / slide-out animation.
-    /// Returns an expression in 't' that evaluates to the overlay coordinate at time t.
-    /// </summary>
-    private static string BuildAxisExpression(
-        AnimationStyle enter, AnimationStyle exit,
-        double start, double end, double enterDur, double exitDur,
-        string xRest, string yRest, bool isX, CultureInfo inv)
-    {
-        // Compute "off-screen" coordinate per axis & per direction.
-        string Off(AnimationStyle dir)
-        {
-            return dir switch
-            {
-                AnimationStyle.SlideLeft   => isX ? "(-overlay_w)"        : yRest,
-                AnimationStyle.SlideRight  => isX ? "(main_w)"            : yRest,
-                AnimationStyle.SlideTop    => isX ? xRest                  : "(-overlay_h)",
-                AnimationStyle.SlideBottom => isX ? xRest                  : "(main_h)",
-                _ => isX ? xRest : yRest
-            };
-        }
-
-        string rest = isX ? xRest : yRest;
-        string s = start.ToString("0.######", inv);
-        string e = end.ToString("0.######", inv);
-        string enterEnd = (start + enterDur).ToString("0.######", inv);
-        string exitStart = (end - exitDur).ToString("0.######", inv);
-
-        // During enter: lerp from off -> rest
-        string offEnter = Off(enter);
-        string enterPart = enterDur > 0
-            ? $"if(lt(t,{enterEnd}),{offEnter}+(({rest})-({offEnter}))*((t-{s})/{enterDur.ToString("0.######", inv)}),"
-            : $"if(lt(t,{s}),{rest},";
-
-        string offExit = Off(exit);
-        string exitPart = exitDur > 0
-            ? $"if(gt(t,{exitStart}),{rest}+(({offExit})-({rest}))*((t-{exitStart})/{exitDur.ToString("0.######", inv)}),{rest}))"
-            : $"{rest})";
-
-        // Wrap with "is in instance" guard handled by enable= filter, so just chain the parts.
-        return enterPart + exitPart;
-    }
-
-    private static bool IsHorizontal(AnimationStyle style) =>
-        style is AnimationStyle.SlideLeft or AnimationStyle.SlideRight;
-
-    private static string HorizontalRestXExpr(Animation anim, string fallback)
-    {
-        if (anim.Enter == AnimationStyle.SlideLeft || anim.Exit == AnimationStyle.SlideLeft)
-            return "0";
-        if (anim.Enter == AnimationStyle.SlideRight || anim.Exit == AnimationStyle.SlideRight)
-            return "(main_w-overlay_w)";
-        return fallback;
     }
 }
