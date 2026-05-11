@@ -35,8 +35,11 @@ public partial class MainWindow : Window
     public ObservableCollection<InstanceListItem> Instances { get; } = new();
     public ObservableCollection<RecentProjectItem> RecentProjects { get; } = new();
     public ObservableCollection<ElementListItem> ElementsListItems { get; } = new();
+    public ObservableCollection<InstanceTextFieldItem> InstanceTextFields { get; } = new();
 
     private bool _isApplyingTemplateEditor;
+    private bool _isApplyingInstanceEditor;
+    private string? _instanceEditorInstanceId;
 
     public MainWindow()
     {
@@ -49,6 +52,7 @@ public partial class MainWindow : Window
         InstancesList.ItemsSource = Instances;
         RecentProjectsList.ItemsSource = RecentProjects;
         ElementsList.ItemsSource = ElementsListItems;
+        InstanceTextFieldsList.ItemsSource = InstanceTextFields;
         TemplateEnterBox.ItemsSource = Enum.GetValues<AnimationStyle>();
         TemplateExitBox.ItemsSource = Enum.GetValues<AnimationStyle>();
         ShapeKindBox.ItemsSource = Enum.GetValues<ShapeKind>();
@@ -99,9 +103,12 @@ public partial class MainWindow : Window
         };
 
         PreviewImage.PointerPressed += OnPreviewClicked;
-        InstancesList.SelectionChanged += (_, _) => UpdateInstanceEditor();
+        InstancesList.SelectionChanged += (_, _) =>
+        {
+            CommitInstanceEdit();
+            UpdateInstanceEditor();
+        };
         DeleteInstanceButton.Click += OnDeleteInstance;
-        ApplyInstanceButton.Click += OnApplyInstance;
         PreviewInstanceButton.Click += OnPreviewInstance;
 
         PlayPauseButton.Click += (_, _) => TogglePlay();
@@ -112,15 +119,10 @@ public partial class MainWindow : Window
         JumpBack10sButton.Click += (_, _) => SeekRelative(-10000);
         JumpForward10sButton.Click += (_, _) => SeekRelative(+10000);
 
-        InstanceTextBox.LostFocus += (_, _) => CommitInstanceEdit();
-        InstanceTextBox.KeyDown += (_, args) =>
-        {
-            if (args.Key == Key.Enter && args.KeyModifiers.HasFlag(KeyModifiers.Control))
-            {
-                CommitInstanceEdit();
-                args.Handled = true;
-            }
-        };
+        InstanceStartBox.LostFocus += (_, _) => CommitInstanceEdit();
+        InstanceDurationBox.LostFocus += (_, _) => CommitInstanceEdit();
+        InstanceXBox.LostFocus += (_, _) => CommitInstanceEdit();
+        InstanceYBox.LostFocus += (_, _) => CommitInstanceEdit();
 
         LoadRecentProjects();
         ApplyProject(_project, null, showDashboard: true);
@@ -413,8 +415,9 @@ public partial class MainWindow : Window
         foreach (var t in _api.ListTemplates(_project)) Templates.Add(t);
     }
 
-    private void RefreshInstances()
+    private void RefreshInstances(string? preserveSelectedId = null)
     {
+        preserveSelectedId ??= (InstancesList.SelectedItem as InstanceListItem)?.Instance.Id;
         Instances.Clear();
         foreach (var i in _api.ListInstances(_project).OrderBy(i => i.StartMs))
         {
@@ -427,6 +430,9 @@ public partial class MainWindow : Window
                 TimeLabel = $"{(int)startTs.TotalMinutes}:{startTs.Seconds:00}.{startTs.Milliseconds:000}"
             });
         }
+
+        if (!string.IsNullOrWhiteSpace(preserveSelectedId))
+            InstancesList.SelectedItem = Instances.FirstOrDefault(x => x.Instance.Id == preserveSelectedId);
     }
 
     private TemplateInstance? SelectedInstance =>
@@ -461,9 +467,7 @@ public partial class MainWindow : Window
 
     private void CommitInstanceEdit()
     {
-        if (InstancesList.SelectedItem is not InstanceListItem) return;
-        OnApplyInstance(this, new RoutedEventArgs());
-        _ = RefreshPreviewAsync();
+        _ = ApplyInstanceFromEditorAsync("update-instance");
     }
 
     private async Task RefreshPreviewAsync()
@@ -497,9 +501,8 @@ public partial class MainWindow : Window
         var placement = ResolveClickPlacement(template, cx, cy);
         var values = template.Elements.OfType<TextElement>().ToDictionary(t => t.Id, t => t.DefaultText ?? "");
         var inst = _api.AddInstance(_project, new AddInstanceRequest(template.Id, placement.centerX, placement.centerY, _currentTimeMs, null, values, placement.animationOverride));
-        RefreshInstances();
+        RefreshInstances(inst.Id);
         InstancesList.SelectedItem = Instances.FirstOrDefault(item => item.Instance.Id == inst.Id);
-        Dispatcher.UIThread.Post(() => { InstanceTextBox.Focus(); InstanceTextBox.SelectAll(); }, DispatcherPriority.Background);
         await RefreshPreviewAsync();
         await AutoSaveAsync("add-instance");
     }
@@ -512,55 +515,89 @@ public partial class MainWindow : Window
         await AutoSaveAsync("delete-instance");
     }
 
-    private static Dictionary<string, string> MapTextToElements(Template t, string text)
-    {
-        var lines = text.Replace("\r\n", "\n").Split('\n');
-        var textElements = t.Elements.OfType<TextElement>().ToList();
-        var d = new Dictionary<string, string>();
-        for (int i = 0; i < textElements.Count; i++)
-            d[textElements[i].Id] = i < lines.Length ? lines[i] : "";
-        return d;
-    }
-
     private void UpdateInstanceEditor()
     {
         if (SelectedInstance is not { } i)
         {
             InstanceEditor.IsVisible = false;
+            _instanceEditorInstanceId = null;
+            InstanceTextFields.Clear();
             return;
         }
 
         InstanceEditor.IsVisible = true;
-        InstanceStartBox.Text = i.StartMs.ToString();
-        InstanceDurationBox.Text = i.DurationMs.ToString();
-        InstanceXBox.Text = i.Center.X.ToString("0.###");
-        InstanceYBox.Text = i.Center.Y.ToString("0.###");
-        var template = _project.Templates.FirstOrDefault(t => t.Id == i.TemplateId);
-        InstanceTemplateNameLabel.Text = template is not null ? $"Template: {template.Name}" : $"Template ID: {i.TemplateId}";
-        var lines = new List<string>();
-        if (template is not null)
+        _instanceEditorInstanceId = i.Id;
+        _isApplyingInstanceEditor = true;
+        try
         {
-            foreach (var te in template.Elements.OfType<TextElement>())
-                lines.Add(i.TextValues.TryGetValue(te.Id, out var v) ? v : te.DefaultText);
+            InstanceStartBox.Text = i.StartMs.ToString();
+            InstanceDurationBox.Text = i.DurationMs.ToString();
+            InstanceXBox.Text = i.Center.X.ToString("0.###");
+            InstanceYBox.Text = i.Center.Y.ToString("0.###");
+            var template = _project.Templates.FirstOrDefault(t => t.Id == i.TemplateId);
+            InstanceTemplateNameLabel.Text = template is not null ? $"Template: {template.Name}" : $"Template ID: {i.TemplateId}";
+
+            InstanceTextFields.Clear();
+            if (template is not null)
+            {
+                foreach (var te in template.Elements.OfType<TextElement>())
+                {
+                    InstanceTextFields.Add(new InstanceTextFieldItem
+                    {
+                        ElementId = te.Id,
+                        Label = te.Id,
+                        Value = i.TextValues.TryGetValue(te.Id, out var v) ? v : te.DefaultText
+                    });
+                }
+            }
+            else
+            {
+                foreach (var kv in i.TextValues)
+                {
+                    InstanceTextFields.Add(new InstanceTextFieldItem
+                    {
+                        ElementId = kv.Key,
+                        Label = kv.Key,
+                        Value = kv.Value
+                    });
+                }
+            }
         }
-        InstanceTextBox.Text = string.Join(Environment.NewLine, lines);
+        finally
+        {
+            _isApplyingInstanceEditor = false;
+        }
     }
 
     private async void OnApplyInstance(object? sender, RoutedEventArgs e)
     {
-        if (SelectedInstance is not { } i) return;
-        var template = _project.Templates.First(t => t.Id == i.TemplateId);
+        await ApplyInstanceFromEditorAsync("update-instance");
+    }
+
+    private async Task ApplyInstanceFromEditorAsync(string reason)
+    {
+        if (_isApplyingProject || _isApplyingInstanceEditor) return;
+        if (string.IsNullOrWhiteSpace(_instanceEditorInstanceId)) return;
+        var i = _project.Instances.FirstOrDefault(x => x.Id == _instanceEditorInstanceId);
+        if (i is null) return;
+
         var req = new UpdateInstanceRequest(
             i.Id,
             double.TryParse(InstanceXBox.Text, out var x) ? x : null,
             double.TryParse(InstanceYBox.Text, out var y) ? y : null,
             int.TryParse(InstanceStartBox.Text, out var s) ? s : null,
             int.TryParse(InstanceDurationBox.Text, out var d) ? d : null,
-            MapTextToElements(template, InstanceTextBox.Text ?? ""),
+            InstanceTextFields.ToDictionary(t => t.ElementId, t => t.Value ?? string.Empty),
             null);
         _api.UpdateInstance(_project, req);
-        RefreshInstances();
-        await AutoSaveAsync("update-instance");
+        RefreshInstances(i.Id);
+        await AutoSaveAsync(reason);
+        await RefreshPreviewAsync();
+    }
+
+    private async void OnInstanceTextFieldLostFocus(object? sender, RoutedEventArgs e)
+    {
+        await ApplyInstanceFromEditorAsync("update-instance-text");
     }
 
     private void UpdateTemplateEditor()
@@ -1245,4 +1282,12 @@ public sealed class ElementListItem
     public required Element Element { get; init; }
     public required string Icon { get; init; }
     public required string Summary { get; init; }
+}
+
+/// <summary>Display row for an instance text value mapped to a template text element.</summary>
+public sealed class InstanceTextFieldItem
+{
+    public required string ElementId { get; init; }
+    public required string Label { get; init; }
+    public string Value { get; set; } = "";
 }

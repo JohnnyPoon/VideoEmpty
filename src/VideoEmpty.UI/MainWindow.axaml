@@ -258,15 +258,28 @@
                     <StackPanel x:Name="InstanceEditor" DockPanel.Dock="Bottom" Spacing="4" IsVisible="False" Margin="0,8,0,0">
                         <TextBlock Text="Selected instance" FontWeight="Bold"/>
                         <TextBlock x:Name="InstanceTemplateNameLabel" FontSize="11" Foreground="Gray"/>
-                        <Grid ColumnDefinitions="80,*" RowDefinitions="Auto,Auto,Auto,Auto,Auto" RowSpacing="4" ColumnSpacing="6">
+                        <Grid ColumnDefinitions="80,*" RowDefinitions="Auto,Auto,Auto,Auto" RowSpacing="4" ColumnSpacing="6">
                             <TextBlock Text="Start ms"/>      <TextBox Grid.Column="1" x:Name="InstanceStartBox"/>
                             <TextBlock Grid.Row="1" Text="Duration ms"/> <TextBox Grid.Row="1" Grid.Column="1" x:Name="InstanceDurationBox"/>
                             <TextBlock Grid.Row="2" Text="Center X"/>    <TextBox Grid.Row="2" Grid.Column="1" x:Name="InstanceXBox"/>
                             <TextBlock Grid.Row="3" Text="Center Y"/>    <TextBox Grid.Row="3" Grid.Column="1" x:Name="InstanceYBox"/>
-                            <TextBlock Grid.Row="4" Text="Text"/>        <TextBox Grid.Row="4" Grid.Column="1" x:Name="InstanceTextBox" AcceptsReturn="True" Height="80"/>
                         </Grid>
+                        <TextBlock Text="Text rows (mapped to template text elements)" FontSize="11" Foreground="Gray"/>
+                        <ListBox x:Name="InstanceTextFieldsList" MaxHeight="160">
+                            <ListBox.ItemTemplate>
+                                <DataTemplate DataType="local:InstanceTextFieldItem">
+                                    <Grid ColumnDefinitions="90,*" RowDefinitions="Auto" Margin="0,2">
+                                        <TextBlock Text="{Binding Label}" VerticalAlignment="Center" FontSize="11" Foreground="Gray"/>
+                                        <TextBox Grid.Column="1"
+                                                 Text="{Binding Value}"
+                                                 AcceptsReturn="True"
+                                                 MinHeight="44"
+                                                 LostFocus="OnInstanceTextFieldLostFocus"/>
+                                    </Grid>
+                                </DataTemplate>
+                            </ListBox.ItemTemplate>
+                        </ListBox>
                         <StackPanel Orientation="Horizontal" Spacing="6">
-                            <Button x:Name="ApplyInstanceButton" Content="Apply"/>
                             <Button x:Name="PreviewInstanceButton" Content="▶ Jump to" ToolTip.Tip="Jump video to start of this instance"/>
                             <Button x:Name="DeleteInstanceButton" Content="Delete"/>
                         </StackPanel>
