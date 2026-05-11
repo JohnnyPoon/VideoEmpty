@@ -55,6 +55,7 @@ public partial class MainWindow : Window
         DataContext = this;
 
         TemplatesList.ItemsSource = Templates;
+        CompactTemplatesListBox.ItemsSource = Templates;
         InstancesList.ItemsSource = Instances;
         RecentProjectsList.ItemsSource = RecentProjects;
         ElementsList.ItemsSource = ElementsListItems;
@@ -1397,10 +1398,19 @@ public partial class MainWindow : Window
     {
         LeftTemplatePanel.IsVisible = _showLeftPanel;
         RightPropertiesPanel.IsVisible = _showRightPanel;
+        CompactTemplatesToolbar.IsVisible = _compactMode;
 
         // Update button states
         CompactModeButton.Classes.Set("active", _compactMode);
         TogglePanelsButton.Classes.Set("active", !_showLeftPanel);
+    }
+
+    private void OnCompactTemplateButtonClicked(object? sender, RoutedEventArgs e)
+    {
+        if (sender is not Button btn || btn.Tag is not string templateId) return;
+        _armedTemplateId = templateId;
+        var template = _api.GetTemplate(_project, templateId);
+        ArmedLabel.Text = $"Armed: {template.Name} (click video to add)";
     }
 
     private async Task PollJob(string jobId)

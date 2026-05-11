@@ -70,6 +70,23 @@
                 <TextBlock x:Name="VideoInfoLabel" VerticalAlignment="Center" Margin="16,0,0,0"/>
             </StackPanel>
 
+            <StackPanel x:Name="CompactTemplatesToolbar" DockPanel.Dock="Top" Orientation="Horizontal" Spacing="4" Margin="4" IsVisible="False">
+                <TextBlock Text="Templates:" VerticalAlignment="Center" Foreground="Gray" Margin="4,0"/>
+                <ListBox x:Name="CompactTemplatesListBox" Height="40" HorizontalAlignment="Stretch">
+                    <ListBox.ItemsPanel>
+                        <ItemsPanelTemplate>
+                            <StackPanel Orientation="Horizontal"/>
+                        </ItemsPanelTemplate>
+                    </ListBox.ItemsPanel>
+                    <ListBox.ItemTemplate>
+                        <DataTemplate DataType="model:Template">
+                            <Button Tag="{Binding Id}" Content="{Binding Name}" Padding="8,4" 
+                                    Click="OnCompactTemplateButtonClicked" ToolTip.Tip="{Binding Name}"/>
+                        </DataTemplate>
+                    </ListBox.ItemTemplate>
+                </ListBox>
+            </StackPanel>
+
             <Border DockPanel.Dock="Bottom" Background="#222" Padding="6,3">
                 <StackPanel Orientation="Horizontal" Spacing="16">
                     <TextBlock x:Name="ArmedLabel" Foreground="White" Text="(none armed)"/>
