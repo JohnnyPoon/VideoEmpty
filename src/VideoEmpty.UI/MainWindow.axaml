@@ -274,6 +274,7 @@
                                                  Text="{Binding Value}"
                                                  AcceptsReturn="True"
                                                  MinHeight="44"
+                                                 KeyDown="OnInstanceTextFieldKeyDown"
                                                  LostFocus="OnInstanceTextFieldLostFocus"/>
                                     </Grid>
                                 </DataTemplate>

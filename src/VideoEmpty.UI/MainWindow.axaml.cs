@@ -599,6 +599,30 @@ public partial class MainWindow : Window
         await ApplyInstanceFromEditorAsync("update-instance-text");
     }
 
+    private void OnInstanceTextFieldKeyDown(object? sender, KeyEventArgs e)
+    {
+        if (sender is not TextBox current || e.Key != Key.Tab) return;
+
+        var boxes = InstanceTextFieldsList
+            .GetVisualDescendants()
+            .OfType<TextBox>()
+            .Where(tb => tb.IsVisible && tb.IsEffectivelyEnabled)
+            .OrderBy(tb => tb.Bounds.Y)
+            .ThenBy(tb => tb.Bounds.X)
+            .ToList();
+        var index = boxes.IndexOf(current);
+        if (index < 0) return;
+
+        var delta = e.KeyModifiers.HasFlag(KeyModifiers.Shift) ? -1 : 1;
+        var nextIndex = index + delta;
+        if (nextIndex < 0 || nextIndex >= boxes.Count) return;
+
+        e.Handled = true;
+        var next = boxes[nextIndex];
+        next.Focus();
+        next.SelectAll();
+    }
+
     private void FocusFirstInstanceTextFieldForReplace()
     {
         Dispatcher.UIThread.Post(() =>
