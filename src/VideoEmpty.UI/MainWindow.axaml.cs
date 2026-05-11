@@ -33,6 +33,10 @@ public partial class MainWindow : Window
     private DispatcherTimer? _playTimer;
     private bool _isApplyingProject;
 
+    private bool _compactMode;
+    private bool _showLeftPanel = true;
+    private bool _showRightPanel = true;
+
     public ObservableCollection<Template> Templates { get; } = new();
     public ObservableCollection<InstanceListItem> Instances { get; } = new();
     public ObservableCollection<RecentProjectItem> RecentProjects { get; } = new();
@@ -68,6 +72,8 @@ public partial class MainWindow : Window
         OpenVideoButton.Click += OnOpenVideo;
         ExportButton.Click += OnExport;
         ExportSubtitlesButton.Click += OnExportSubtitles;
+        TogglePanelsButton.Click += OnTogglePanels;
+        CompactModeButton.Click += OnToggleCompactMode;
         InstallDepsButton.Click += OnInstallDeps;
         OpenLogButton.Click += (_, _) => OpenInShell(Log.LogPath);
 
@@ -1362,6 +1368,39 @@ public partial class MainWindow : Window
             Log.Error("UI", "Subtitle export failed", ex);
             ExportStatus.Text = $"Export failed: {ex.Message}";
         }
+    }
+
+    private void OnTogglePanels(object? sender, RoutedEventArgs e)
+    {
+        _showLeftPanel = !_showLeftPanel;
+        _showRightPanel = !_showRightPanel;
+        ApplyLayoutMode();
+    }
+
+    private void OnToggleCompactMode(object? sender, RoutedEventArgs e)
+    {
+        _compactMode = !_compactMode;
+        if (_compactMode)
+        {
+            _showLeftPanel = false;
+            _showRightPanel = false;
+        }
+        else
+        {
+            _showLeftPanel = true;
+            _showRightPanel = true;
+        }
+        ApplyLayoutMode();
+    }
+
+    private void ApplyLayoutMode()
+    {
+        LeftTemplatePanel.IsVisible = _showLeftPanel;
+        RightPropertiesPanel.IsVisible = _showRightPanel;
+
+        // Update button states
+        CompactModeButton.Classes.Set("active", _compactMode);
+        TogglePanelsButton.Classes.Set("active", !_showLeftPanel);
     }
 
     private async Task PollJob(string jobId)
