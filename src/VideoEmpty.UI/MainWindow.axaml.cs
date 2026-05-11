@@ -34,6 +34,9 @@ public partial class MainWindow : Window
     public ObservableCollection<Template> Templates { get; } = new();
     public ObservableCollection<InstanceListItem> Instances { get; } = new();
     public ObservableCollection<RecentProjectItem> RecentProjects { get; } = new();
+    public ObservableCollection<ElementListItem> ElementsListItems { get; } = new();
+
+    private bool _isApplyingTemplateEditor;
 
     public MainWindow()
     {
@@ -45,8 +48,12 @@ public partial class MainWindow : Window
         TemplatesList.ItemsSource = Templates;
         InstancesList.ItemsSource = Instances;
         RecentProjectsList.ItemsSource = RecentProjects;
+        ElementsList.ItemsSource = ElementsListItems;
         TemplateEnterBox.ItemsSource = Enum.GetValues<AnimationStyle>();
         TemplateExitBox.ItemsSource = Enum.GetValues<AnimationStyle>();
+        ShapeKindBox.ItemsSource = Enum.GetValues<ShapeKind>();
+        TextHAlignBox.ItemsSource = Enum.GetValues<HorizontalAlign>();
+        TextVAlignBox.ItemsSource = Enum.GetValues<VerticalAlign>();
 
         SaveProjectButton.Click += OnSaveProject;
         UndoButton.Click += OnUndo;
@@ -65,6 +72,7 @@ public partial class MainWindow : Window
         DuplicateTemplateButton.Click += OnDuplicateTemplate;
         DeleteTemplateButton.Click += OnDeleteTemplate;
         ApplyTemplateJsonButton.Click += OnApplyTemplateJson;
+        WireTemplateEditorAutoApply();
 
         TimeSlider.PropertyChanged += (_, e) =>
         {
@@ -95,7 +103,6 @@ public partial class MainWindow : Window
         DeleteInstanceButton.Click += OnDeleteInstance;
         ApplyInstanceButton.Click += OnApplyInstance;
         PreviewInstanceButton.Click += OnPreviewInstance;
-        ApplyTemplateButton.Click += OnApplyTemplate;
 
         PlayPauseButton.Click += (_, _) => TogglePlay();
         StepBackButton.Click += (_, _) => SeekRelative(-FrameDurationMs());
@@ -560,41 +567,406 @@ public partial class MainWindow : Window
     {
         if (TemplatesList.SelectedItem is not Template t)
         {
-            TemplateEditor.IsVisible = false;
+            TemplateEditorScroll.IsVisible = false;
             TemplateJsonBox.Text = "";
+            ElementsListItems.Clear();
+            ElementEditorPanel.IsVisible = false;
             return;
         }
 
-        TemplateEditor.IsVisible = true;
-        TemplateNameBox.Text = t.Name;
-        TemplateWidthBox.Text = t.Width.ToString();
-        TemplateHeightBox.Text = t.Height.ToString();
-        TemplateDurationBox.Text = t.DefaultDurationMs.ToString();
-        TemplateEnterBox.SelectedItem = t.Animation.Enter;
-        TemplateExitBox.SelectedItem = t.Animation.Exit;
-        TemplateEnterMsBox.Text = t.Animation.EnterMs.ToString();
-        TemplateExitMsBox.Text = t.Animation.ExitMs.ToString();
-        TemplateJsonBox.Text = JsonSerializer.Serialize(t, ProjectJson.Options);
+        TemplateEditorScroll.IsVisible = true;
+        _isApplyingTemplateEditor = true;
+        try
+        {
+            TemplateNameBox.Text = t.Name;
+            TemplateWidthBox.Text = t.Width.ToString();
+            TemplateHeightBox.Text = t.Height.ToString();
+            TemplateDurationBox.Text = t.DefaultDurationMs.ToString();
+            TemplateEnterBox.SelectedItem = t.Animation.Enter;
+            TemplateExitBox.SelectedItem = t.Animation.Exit;
+            TemplateEnterMsBox.Text = t.Animation.EnterMs.ToString();
+            TemplateExitMsBox.Text = t.Animation.ExitMs.ToString();
+            TemplateSoundEnterBox.Text = t.Sound.EnterFile ?? "";
+            TemplateSoundExitBox.Text = t.Sound.ExitFile ?? "";
+            TemplateSoundVolumeSlider.Value = t.Sound.Volume;
+            TemplateSoundVolumeLabel.Text = t.Sound.Volume.ToString("0.00");
+            TemplateJsonBox.Text = JsonSerializer.Serialize(t, ProjectJson.Options);
+
+            RebuildElementsList(t, preserveSelectionId: (ElementsList.SelectedItem as ElementListItem)?.Element.Id);
+        }
+        finally
+        {
+            _isApplyingTemplateEditor = false;
+        }
+
+        UpdateElementEditor();
     }
 
-    private async void OnApplyTemplate(object? sender, RoutedEventArgs e)
+    private void RebuildElementsList(Template t, string? preserveSelectionId)
     {
+        ElementsListItems.Clear();
+        foreach (var el in t.Elements)
+            ElementsListItems.Add(BuildElementListItem(el));
+
+        if (preserveSelectionId is not null)
+        {
+            var match = ElementsListItems.FirstOrDefault(x => x.Element.Id == preserveSelectionId);
+            if (match is not null) ElementsList.SelectedItem = match;
+        }
+    }
+
+    private static ElementListItem BuildElementListItem(Element el) => el switch
+    {
+        ShapeElement s => new ElementListItem
+        {
+            Element = s,
+            Icon = s.Shape switch { ShapeKind.Ellipse => "⬭", ShapeKind.RoundedRectangle => "▢", _ => "▭" },
+            Summary = $"{s.Shape} {s.Width}×{s.Height}"
+        },
+        TextElement tx => new ElementListItem
+        {
+            Element = tx,
+            Icon = "T",
+            Summary = $"Text: \"{Truncate(tx.DefaultText, 28)}\" ({tx.FontSize}pt)"
+        },
+        _ => new ElementListItem { Element = el, Icon = "?", Summary = el.Id }
+    };
+
+    private static string Truncate(string s, int max) =>
+        string.IsNullOrEmpty(s) ? "" : (s.Length <= max ? s : s[..max] + "…");
+
+    private void UpdateElementEditor()
+    {
+        var item = ElementsList.SelectedItem as ElementListItem;
+        if (item is null)
+        {
+            ElementEditorPanel.IsVisible = false;
+            return;
+        }
+
+        ElementEditorPanel.IsVisible = true;
+        _isApplyingTemplateEditor = true;
+        try
+        {
+            var el = item.Element;
+            ElementOffsetXBox.Text = el.OffsetX.ToString();
+            ElementOffsetYBox.Text = el.OffsetY.ToString();
+            ElementWidthBox.Text = el.Width.ToString();
+            ElementHeightBox.Text = el.Height.ToString();
+
+            if (el is ShapeElement s)
+            {
+                ElementEditorHeader.Text = $"Shape — {s.Shape}";
+                ShapeElementEditor.IsVisible = true;
+                TextElementEditor.IsVisible = false;
+                ShapeKindBox.SelectedItem = s.Shape;
+                ShapeFillBox.Text = s.Fill.ToHex();
+                ShapeBorderColorBox.Text = s.BorderColor.ToHex();
+                ShapeBorderThicknessBox.Text = s.BorderThickness.ToString();
+                ShapeCornerRadiusBox.Text = s.CornerRadius.ToString();
+                UpdateColorSwatch(ShapeFillSwatch, s.Fill);
+                UpdateColorSwatch(ShapeBorderSwatch, s.BorderColor);
+            }
+            else if (el is TextElement tx)
+            {
+                ElementEditorHeader.Text = "Text element";
+                ShapeElementEditor.IsVisible = false;
+                TextElementEditor.IsVisible = true;
+                TextFontFamilyBox.Text = tx.FontFamily;
+                TextFontSizeBox.Text = tx.FontSize.ToString();
+                TextBoldBox.IsChecked = tx.Bold;
+                TextItalicBox.IsChecked = tx.Italic;
+                TextColorBox.Text = tx.TextColor.ToHex();
+                TextHAlignBox.SelectedItem = tx.HAlign;
+                TextVAlignBox.SelectedItem = tx.VAlign;
+                TextLineSpacingBox.Text = tx.LineSpacing.ToString();
+                TextDefaultTextBox.Text = tx.DefaultText;
+                UpdateColorSwatch(TextColorSwatch, tx.TextColor);
+            }
+        }
+        finally
+        {
+            _isApplyingTemplateEditor = false;
+        }
+    }
+
+    private static void UpdateColorSwatch(Border swatch, Color c)
+    {
+        swatch.Background = new Avalonia.Media.SolidColorBrush(
+            Avalonia.Media.Color.FromArgb(c.A, c.R, c.G, c.B));
+    }
+
+    // ── Auto-apply wiring ──────────────────────────────────────────────────
+
+    private void WireTemplateEditorAutoApply()
+    {
+        // Template-level
+        TemplateNameBox.LostFocus += (_, _) => CommitTemplateEditor();
+        TemplateWidthBox.LostFocus += (_, _) => CommitTemplateEditor();
+        TemplateHeightBox.LostFocus += (_, _) => CommitTemplateEditor();
+        TemplateDurationBox.LostFocus += (_, _) => CommitTemplateEditor();
+        TemplateEnterMsBox.LostFocus += (_, _) => CommitTemplateEditor();
+        TemplateExitMsBox.LostFocus += (_, _) => CommitTemplateEditor();
+        TemplateEnterBox.SelectionChanged += (_, _) => CommitTemplateEditor();
+        TemplateExitBox.SelectionChanged += (_, _) => CommitTemplateEditor();
+        TemplateSoundEnterBox.LostFocus += (_, _) => CommitTemplateEditor();
+        TemplateSoundExitBox.LostFocus += (_, _) => CommitTemplateEditor();
+        TemplateSoundVolumeSlider.PropertyChanged += (_, e) =>
+        {
+            if (e.Property == Slider.ValueProperty)
+            {
+                TemplateSoundVolumeLabel.Text = TemplateSoundVolumeSlider.Value.ToString("0.00");
+                CommitTemplateEditor();
+            }
+        };
+        TemplateSoundEnterBrowse.Click += async (_, _) => await BrowseForSoundAsync(TemplateSoundEnterBox);
+        TemplateSoundExitBrowse.Click += async (_, _) => await BrowseForSoundAsync(TemplateSoundExitBox);
+        TemplateSoundEnterClear.Click += (_, _) => { TemplateSoundEnterBox.Text = ""; CommitTemplateEditor(); };
+        TemplateSoundExitClear.Click += (_, _) => { TemplateSoundExitBox.Text = ""; CommitTemplateEditor(); };
+
+        // Elements list + toolbar
+        ElementsList.SelectionChanged += (_, _) => UpdateElementEditor();
+        AddShapeElementButton.Click += async (_, _) => await OnAddShapeElementAsync();
+        AddTextElementButton.Click += async (_, _) => await OnAddTextElementAsync();
+        DuplicateElementButton.Click += async (_, _) => await OnDuplicateElementAsync();
+        DeleteElementButton.Click += async (_, _) => await OnDeleteElementAsync();
+        MoveElementUpButton.Click += async (_, _) => await OnMoveElementAsync(-1);
+        MoveElementDownButton.Click += async (_, _) => await OnMoveElementAsync(+1);
+
+        // Common element fields
+        ElementOffsetXBox.LostFocus += (_, _) => CommitElementEditor();
+        ElementOffsetYBox.LostFocus += (_, _) => CommitElementEditor();
+        ElementWidthBox.LostFocus += (_, _) => CommitElementEditor();
+        ElementHeightBox.LostFocus += (_, _) => CommitElementEditor();
+
+        // Shape fields
+        ShapeKindBox.SelectionChanged += (_, _) => CommitElementEditor();
+        ShapeFillBox.LostFocus += (_, _) => CommitElementEditor();
+        ShapeBorderColorBox.LostFocus += (_, _) => CommitElementEditor();
+        ShapeBorderThicknessBox.LostFocus += (_, _) => CommitElementEditor();
+        ShapeCornerRadiusBox.LostFocus += (_, _) => CommitElementEditor();
+
+        // Text fields
+        TextFontFamilyBox.LostFocus += (_, _) => CommitElementEditor();
+        TextFontSizeBox.LostFocus += (_, _) => CommitElementEditor();
+        TextBoldBox.IsCheckedChanged += (_, _) => CommitElementEditor();
+        TextItalicBox.IsCheckedChanged += (_, _) => CommitElementEditor();
+        TextColorBox.LostFocus += (_, _) => CommitElementEditor();
+        TextHAlignBox.SelectionChanged += (_, _) => CommitElementEditor();
+        TextVAlignBox.SelectionChanged += (_, _) => CommitElementEditor();
+        TextLineSpacingBox.LostFocus += (_, _) => CommitElementEditor();
+        TextDefaultTextBox.LostFocus += (_, _) => CommitElementEditor();
+    }
+
+    private async Task BrowseForSoundAsync(TextBox target)
+    {
+        var files = await StorageProvider.OpenFilePickerAsync(new FilePickerOpenOptions
+        {
+            Title = "Choose sound file",
+            AllowMultiple = false,
+            FileTypeFilter = new[] { new FilePickerFileType("Audio") { Patterns = new[] { "*.mp3", "*.wav", "*.ogg", "*.m4a", "*.aac" } } }
+        });
+        var path = files.FirstOrDefault()?.TryGetLocalPath();
+        if (string.IsNullOrWhiteSpace(path)) return;
+        target.Text = path;
+        CommitTemplateEditor();
+    }
+
+    private async void CommitTemplateEditor()
+    {
+        if (_isApplyingTemplateEditor) return;
         if (TemplatesList.SelectedItem is not Template t) return;
 
-        t.Name = string.IsNullOrWhiteSpace(TemplateNameBox.Text) ? t.Name : TemplateNameBox.Text.Trim();
-        if (int.TryParse(TemplateWidthBox.Text, out var w)) t.Width = Math.Max(10, w);
-        if (int.TryParse(TemplateHeightBox.Text, out var h)) t.Height = Math.Max(10, h);
-        if (int.TryParse(TemplateDurationBox.Text, out var dur)) t.DefaultDurationMs = Math.Max(1, dur);
-        if (TemplateEnterBox.SelectedItem is AnimationStyle enter) t.Animation.Enter = enter;
-        if (TemplateExitBox.SelectedItem is AnimationStyle exit) t.Animation.Exit = exit;
-        if (int.TryParse(TemplateEnterMsBox.Text, out var enterMs)) t.Animation.EnterMs = Math.Max(0, enterMs);
-        if (int.TryParse(TemplateExitMsBox.Text, out var exitMs)) t.Animation.ExitMs = Math.Max(0, exitMs);
+        try
+        {
+            t.Name = string.IsNullOrWhiteSpace(TemplateNameBox.Text) ? t.Name : TemplateNameBox.Text.Trim();
+            if (int.TryParse(TemplateWidthBox.Text, out var w)) t.Width = Math.Max(10, w);
+            if (int.TryParse(TemplateHeightBox.Text, out var h)) t.Height = Math.Max(10, h);
+            if (int.TryParse(TemplateDurationBox.Text, out var dur)) t.DefaultDurationMs = Math.Max(1, dur);
+            if (TemplateEnterBox.SelectedItem is AnimationStyle enter) t.Animation.Enter = enter;
+            if (TemplateExitBox.SelectedItem is AnimationStyle exit) t.Animation.Exit = exit;
+            if (int.TryParse(TemplateEnterMsBox.Text, out var enterMs)) t.Animation.EnterMs = Math.Max(0, enterMs);
+            if (int.TryParse(TemplateExitMsBox.Text, out var exitMs)) t.Animation.ExitMs = Math.Max(0, exitMs);
+            t.Sound.EnterFile = string.IsNullOrWhiteSpace(TemplateSoundEnterBox.Text) ? null : TemplateSoundEnterBox.Text.Trim();
+            t.Sound.ExitFile = string.IsNullOrWhiteSpace(TemplateSoundExitBox.Text) ? null : TemplateSoundExitBox.Text.Trim();
+            t.Sound.Volume = Math.Clamp(TemplateSoundVolumeSlider.Value, 0, 4);
 
+            _api.UpdateTemplate(_project, t);
+            _isApplyingTemplateEditor = true;
+            try
+            {
+                TemplateJsonBox.Text = JsonSerializer.Serialize(t, ProjectJson.Options);
+                RefreshTemplates();
+                TemplatesList.SelectedItem = Templates.FirstOrDefault(x => x.Id == t.Id);
+            }
+            finally { _isApplyingTemplateEditor = false; }
+            await AutoSaveAsync("update-template");
+            await RefreshPreviewAsync();
+        }
+        catch (Exception ex)
+        {
+            Log.Error("UI", "CommitTemplateEditor failed", ex);
+            ExportStatus.Text = $"Template error: {ex.Message}";
+        }
+    }
+
+    private async void CommitElementEditor()
+    {
+        if (_isApplyingTemplateEditor) return;
+        if (TemplatesList.SelectedItem is not Template t) return;
+        if (ElementsList.SelectedItem is not ElementListItem item) return;
+
+        var el = item.Element;
+        try
+        {
+            if (int.TryParse(ElementOffsetXBox.Text, out var ox)) el.OffsetX = ox;
+            if (int.TryParse(ElementOffsetYBox.Text, out var oy)) el.OffsetY = oy;
+            if (int.TryParse(ElementWidthBox.Text, out var ew)) el.Width = Math.Max(1, ew);
+            if (int.TryParse(ElementHeightBox.Text, out var eh)) el.Height = Math.Max(1, eh);
+
+            if (el is ShapeElement s)
+            {
+                if (ShapeKindBox.SelectedItem is ShapeKind sk) s.Shape = sk;
+                if (TryParseColor(ShapeFillBox.Text, out var fill)) { s.Fill = fill; UpdateColorSwatch(ShapeFillSwatch, fill); }
+                if (TryParseColor(ShapeBorderColorBox.Text, out var bc)) { s.BorderColor = bc; UpdateColorSwatch(ShapeBorderSwatch, bc); }
+                if (int.TryParse(ShapeBorderThicknessBox.Text, out var bt)) s.BorderThickness = Math.Max(0, bt);
+                if (int.TryParse(ShapeCornerRadiusBox.Text, out var cr)) s.CornerRadius = Math.Max(0, cr);
+            }
+            else if (el is TextElement tx)
+            {
+                if (!string.IsNullOrWhiteSpace(TextFontFamilyBox.Text)) tx.FontFamily = TextFontFamilyBox.Text.Trim();
+                if (int.TryParse(TextFontSizeBox.Text, out var fs)) tx.FontSize = Math.Max(4, fs);
+                tx.Bold = TextBoldBox.IsChecked == true;
+                tx.Italic = TextItalicBox.IsChecked == true;
+                if (TryParseColor(TextColorBox.Text, out var tc)) { tx.TextColor = tc; UpdateColorSwatch(TextColorSwatch, tc); }
+                if (TextHAlignBox.SelectedItem is HorizontalAlign ha) tx.HAlign = ha;
+                if (TextVAlignBox.SelectedItem is VerticalAlign va) tx.VAlign = va;
+                if (int.TryParse(TextLineSpacingBox.Text, out var ls)) tx.LineSpacing = Math.Max(0, ls);
+                tx.DefaultText = TextDefaultTextBox.Text ?? "";
+            }
+
+            _api.UpdateTemplate(_project, t);
+            _isApplyingTemplateEditor = true;
+            try
+            {
+                TemplateJsonBox.Text = JsonSerializer.Serialize(t, ProjectJson.Options);
+                // Update list-item summary in-place
+                var rebuilt = BuildElementListItem(el);
+                var idx = ElementsListItems.IndexOf(item);
+                if (idx >= 0)
+                {
+                    ElementsListItems[idx] = rebuilt;
+                    ElementsList.SelectedItem = rebuilt;
+                }
+            }
+            finally { _isApplyingTemplateEditor = false; }
+            await AutoSaveAsync("update-element");
+            await RefreshPreviewAsync();
+        }
+        catch (Exception ex)
+        {
+            Log.Error("UI", "CommitElementEditor failed", ex);
+            ExportStatus.Text = $"Element error: {ex.Message}";
+        }
+    }
+
+    private static bool TryParseColor(string? hex, out Color c)
+    {
+        c = default;
+        if (string.IsNullOrWhiteSpace(hex)) return false;
+        try { c = Color.FromHex(hex.Trim()); return true; }
+        catch { return false; }
+    }
+
+    private async Task OnAddShapeElementAsync()
+    {
+        if (TemplatesList.SelectedItem is not Template t) return;
+        var el = new ShapeElement
+        {
+            Id = Guid.NewGuid().ToString("n"),
+            OffsetX = 0, OffsetY = 0,
+            Width = Math.Max(40, t.Width / 2),
+            Height = Math.Max(40, t.Height / 2),
+            Shape = ShapeKind.Rectangle,
+            Fill = Color.White,
+            BorderColor = Color.Black,
+            BorderThickness = 2,
+            CornerRadius = 0
+        };
+        t.Elements.Add(el);
         _api.UpdateTemplate(_project, t);
-        RefreshTemplates();
-        TemplatesList.SelectedItem = Templates.FirstOrDefault(x => x.Id == t.Id);
         UpdateTemplateEditor();
-        await AutoSaveAsync("update-template");
+        ElementsList.SelectedItem = ElementsListItems.FirstOrDefault(x => x.Element.Id == el.Id);
+        await AutoSaveAsync("add-shape-element");
+        await RefreshPreviewAsync();
+    }
+
+    private async Task OnAddTextElementAsync()
+    {
+        if (TemplatesList.SelectedItem is not Template t) return;
+        var el = new TextElement
+        {
+            Id = Guid.NewGuid().ToString("n"),
+            OffsetX = 8, OffsetY = 8,
+            Width = Math.Max(40, t.Width - 16),
+            Height = Math.Max(20, t.Height - 16),
+            FontFamily = "Segoe UI",
+            FontSize = 24,
+            TextColor = Color.Black,
+            HAlign = HorizontalAlign.Center,
+            VAlign = VerticalAlign.Center,
+            DefaultText = "Text"
+        };
+        t.Elements.Add(el);
+        _api.UpdateTemplate(_project, t);
+        UpdateTemplateEditor();
+        ElementsList.SelectedItem = ElementsListItems.FirstOrDefault(x => x.Element.Id == el.Id);
+        await AutoSaveAsync("add-text-element");
+        await RefreshPreviewAsync();
+    }
+
+    private async Task OnDuplicateElementAsync()
+    {
+        if (TemplatesList.SelectedItem is not Template t) return;
+        if (ElementsList.SelectedItem is not ElementListItem item) return;
+        var json = JsonSerializer.Serialize<Element>(item.Element, ProjectJson.Options);
+        var dup = JsonSerializer.Deserialize<Element>(json, ProjectJson.Options);
+        if (dup is null) return;
+        dup.Id = Guid.NewGuid().ToString("n");
+        dup.OffsetX += 10;
+        dup.OffsetY += 10;
+        var idx = t.Elements.IndexOf(item.Element);
+        t.Elements.Insert(Math.Max(0, idx + 1), dup);
+        _api.UpdateTemplate(_project, t);
+        UpdateTemplateEditor();
+        ElementsList.SelectedItem = ElementsListItems.FirstOrDefault(x => x.Element.Id == dup.Id);
+        await AutoSaveAsync("duplicate-element");
+        await RefreshPreviewAsync();
+    }
+
+    private async Task OnDeleteElementAsync()
+    {
+        if (TemplatesList.SelectedItem is not Template t) return;
+        if (ElementsList.SelectedItem is not ElementListItem item) return;
+        t.Elements.Remove(item.Element);
+        _api.UpdateTemplate(_project, t);
+        UpdateTemplateEditor();
+        await AutoSaveAsync("delete-element");
+        await RefreshPreviewAsync();
+    }
+
+    private async Task OnMoveElementAsync(int delta)
+    {
+        if (TemplatesList.SelectedItem is not Template t) return;
+        if (ElementsList.SelectedItem is not ElementListItem item) return;
+        var idx = t.Elements.IndexOf(item.Element);
+        var newIdx = idx + delta;
+        if (idx < 0 || newIdx < 0 || newIdx >= t.Elements.Count) return;
+        (t.Elements[idx], t.Elements[newIdx]) = (t.Elements[newIdx], t.Elements[idx]);
+        _api.UpdateTemplate(_project, t);
+        UpdateTemplateEditor();
+        ElementsList.SelectedItem = ElementsListItems.FirstOrDefault(x => x.Element.Id == item.Element.Id);
+        await AutoSaveAsync("move-element");
         await RefreshPreviewAsync();
     }
 
@@ -865,4 +1237,12 @@ public sealed class RecentProjectItem
     public required string Name { get; init; }
     public required string CreatedLabel { get; init; }
     public required string UpdatedLabel { get; init; }
+}
+
+/// <summary>Display row for the elements ListBox in the visual template editor.</summary>
+public sealed class ElementListItem
+{
+    public required Element Element { get; init; }
+    public required string Icon { get; init; }
+    public required string Summary { get; init; }
 }

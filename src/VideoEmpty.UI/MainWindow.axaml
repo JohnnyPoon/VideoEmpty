@@ -82,24 +82,138 @@
                             <Button x:Name="DuplicateTemplateButton" Content="Duplicate"/>
                             <Button x:Name="DeleteTemplateButton" Content="Delete"/>
                         </StackPanel>
-                        <StackPanel DockPanel.Dock="Bottom" x:Name="TemplateEditor" Spacing="4" IsVisible="False" Margin="0,8,0,0">
-                            <TextBlock Text="Selected template" FontWeight="Bold"/>
-                            <Grid ColumnDefinitions="120,*" RowDefinitions="Auto,Auto,Auto,Auto,Auto,Auto,Auto" RowSpacing="4" ColumnSpacing="6">
-                                <TextBlock Text="Name"/> <TextBox Grid.Column="1" x:Name="TemplateNameBox"/>
-                                <TextBlock Grid.Row="1" Text="Width"/> <TextBox Grid.Row="1" Grid.Column="1" x:Name="TemplateWidthBox"/>
-                                <TextBlock Grid.Row="2" Text="Height"/> <TextBox Grid.Row="2" Grid.Column="1" x:Name="TemplateHeightBox"/>
-                                <TextBlock Grid.Row="3" Text="Default ms"/> <TextBox Grid.Row="3" Grid.Column="1" x:Name="TemplateDurationBox"/>
-                                <TextBlock Grid.Row="4" Text="Enter"/> <ComboBox Grid.Row="4" Grid.Column="1" x:Name="TemplateEnterBox"/>
-                                <TextBlock Grid.Row="5" Text="Exit"/> <ComboBox Grid.Row="5" Grid.Column="1" x:Name="TemplateExitBox"/>
-                                <TextBlock Grid.Row="6" Text="Enter/Exit ms"/> <StackPanel Grid.Row="6" Grid.Column="1" Orientation="Horizontal" Spacing="4"><TextBox x:Name="TemplateEnterMsBox" Width="80"/><TextBox x:Name="TemplateExitMsBox" Width="80"/></StackPanel>
-                            </Grid>
-                            <TextBlock Text="Template JSON (full element-level editor)"/>
-                            <TextBox x:Name="TemplateJsonBox" AcceptsReturn="True" Height="170" TextWrapping="NoWrap" FontFamily="Consolas"/>
-                            <StackPanel Orientation="Horizontal" Spacing="6">
-                                <Button x:Name="ApplyTemplateButton" Content="Apply Fields"/>
-                                <Button x:Name="ApplyTemplateJsonButton" Content="Apply JSON"/>
+                        <ScrollViewer DockPanel.Dock="Bottom" x:Name="TemplateEditorScroll" IsVisible="False" MaxHeight="540" Margin="0,8,0,0" VerticalScrollBarVisibility="Auto">
+                            <StackPanel x:Name="TemplateEditor" Spacing="6">
+                                <TextBlock Text="Selected template" FontWeight="Bold"/>
+                                <Grid ColumnDefinitions="100,*" RowDefinitions="Auto,Auto,Auto,Auto,Auto,Auto,Auto,Auto,Auto,Auto" RowSpacing="3" ColumnSpacing="4">
+                                    <TextBlock Text="Name" VerticalAlignment="Center"/>
+                                    <TextBox Grid.Column="1" x:Name="TemplateNameBox"/>
+                                    <TextBlock Grid.Row="1" Text="Width" VerticalAlignment="Center"/>
+                                    <TextBox Grid.Row="1" Grid.Column="1" x:Name="TemplateWidthBox"/>
+                                    <TextBlock Grid.Row="2" Text="Height" VerticalAlignment="Center"/>
+                                    <TextBox Grid.Row="2" Grid.Column="1" x:Name="TemplateHeightBox"/>
+                                    <TextBlock Grid.Row="3" Text="Default ms" VerticalAlignment="Center"/>
+                                    <TextBox Grid.Row="3" Grid.Column="1" x:Name="TemplateDurationBox"/>
+                                    <TextBlock Grid.Row="4" Text="Enter" VerticalAlignment="Center"/>
+                                    <ComboBox Grid.Row="4" Grid.Column="1" x:Name="TemplateEnterBox" HorizontalAlignment="Stretch"/>
+                                    <TextBlock Grid.Row="5" Text="Exit" VerticalAlignment="Center"/>
+                                    <ComboBox Grid.Row="5" Grid.Column="1" x:Name="TemplateExitBox" HorizontalAlignment="Stretch"/>
+                                    <TextBlock Grid.Row="6" Text="Enter/Exit ms" VerticalAlignment="Center"/>
+                                    <StackPanel Grid.Row="6" Grid.Column="1" Orientation="Horizontal" Spacing="4">
+                                        <TextBox x:Name="TemplateEnterMsBox" Width="80"/>
+                                        <TextBox x:Name="TemplateExitMsBox" Width="80"/>
+                                    </StackPanel>
+                                    <TextBlock Grid.Row="7" Text="Sound enter" VerticalAlignment="Center"/>
+                                    <Grid Grid.Row="7" Grid.Column="1" ColumnDefinitions="*,Auto,Auto" ColumnSpacing="4">
+                                        <TextBox x:Name="TemplateSoundEnterBox"/>
+                                        <Button Grid.Column="1" x:Name="TemplateSoundEnterBrowse" Content="…" Padding="6,1"/>
+                                        <Button Grid.Column="2" x:Name="TemplateSoundEnterClear" Content="✕" Padding="6,1"/>
+                                    </Grid>
+                                    <TextBlock Grid.Row="8" Text="Sound exit" VerticalAlignment="Center"/>
+                                    <Grid Grid.Row="8" Grid.Column="1" ColumnDefinitions="*,Auto,Auto" ColumnSpacing="4">
+                                        <TextBox x:Name="TemplateSoundExitBox"/>
+                                        <Button Grid.Column="1" x:Name="TemplateSoundExitBrowse" Content="…" Padding="6,1"/>
+                                        <Button Grid.Column="2" x:Name="TemplateSoundExitClear" Content="✕" Padding="6,1"/>
+                                    </Grid>
+                                    <TextBlock Grid.Row="9" Text="Sound volume" VerticalAlignment="Center"/>
+                                    <Grid Grid.Row="9" Grid.Column="1" ColumnDefinitions="*,40" ColumnSpacing="6">
+                                        <Slider x:Name="TemplateSoundVolumeSlider" Minimum="0" Maximum="2" SmallChange="0.05" LargeChange="0.1" TickFrequency="0.1" IsSnapToTickEnabled="False"/>
+                                        <TextBlock Grid.Column="1" x:Name="TemplateSoundVolumeLabel" VerticalAlignment="Center"/>
+                                    </Grid>
+                                </Grid>
+
+                                <Border BorderBrush="#444" BorderThickness="0,1,0,0" Margin="0,4,0,0"/>
+                                <TextBlock Text="Elements" FontWeight="Bold"/>
+                                <StackPanel Orientation="Horizontal" Spacing="4">
+                                    <Button x:Name="AddShapeElementButton" Content="+ Shape"/>
+                                    <Button x:Name="AddTextElementButton" Content="+ Text"/>
+                                    <Button x:Name="DuplicateElementButton" Content="Duplicate"/>
+                                    <Button x:Name="DeleteElementButton" Content="Delete"/>
+                                    <Button x:Name="MoveElementUpButton" Content="↑" ToolTip.Tip="Move up"/>
+                                    <Button x:Name="MoveElementDownButton" Content="↓" ToolTip.Tip="Move down"/>
+                                </StackPanel>
+                                <ListBox x:Name="ElementsList" Height="120">
+                                    <ListBox.ItemTemplate>
+                                        <DataTemplate DataType="local:ElementListItem">
+                                            <StackPanel Orientation="Horizontal" Spacing="6" MinHeight="22">
+                                                <TextBlock Text="{Binding Icon}" FontSize="14"/>
+                                                <TextBlock Text="{Binding Summary}" VerticalAlignment="Center"/>
+                                            </StackPanel>
+                                        </DataTemplate>
+                                    </ListBox.ItemTemplate>
+                                </ListBox>
+
+                                <StackPanel x:Name="ElementEditorPanel" IsVisible="False" Spacing="4">
+                                    <Border BorderBrush="#444" BorderThickness="0,1,0,0"/>
+                                    <TextBlock x:Name="ElementEditorHeader" Text="Element" FontWeight="Bold"/>
+                                    <Grid ColumnDefinitions="100,*" RowDefinitions="Auto,Auto,Auto,Auto" RowSpacing="3" ColumnSpacing="4">
+                                        <TextBlock Text="Offset X" VerticalAlignment="Center"/>
+                                        <TextBox Grid.Column="1" x:Name="ElementOffsetXBox"/>
+                                        <TextBlock Grid.Row="1" Text="Offset Y" VerticalAlignment="Center"/>
+                                        <TextBox Grid.Row="1" Grid.Column="1" x:Name="ElementOffsetYBox"/>
+                                        <TextBlock Grid.Row="2" Text="Width" VerticalAlignment="Center"/>
+                                        <TextBox Grid.Row="2" Grid.Column="1" x:Name="ElementWidthBox"/>
+                                        <TextBlock Grid.Row="3" Text="Height" VerticalAlignment="Center"/>
+                                        <TextBox Grid.Row="3" Grid.Column="1" x:Name="ElementHeightBox"/>
+                                    </Grid>
+
+                                    <StackPanel x:Name="ShapeElementEditor" IsVisible="False" Spacing="4">
+                                        <Grid ColumnDefinitions="100,*" RowDefinitions="Auto,Auto,Auto,Auto,Auto" RowSpacing="3" ColumnSpacing="4">
+                                            <TextBlock Text="Shape" VerticalAlignment="Center"/>
+                                            <ComboBox Grid.Column="1" x:Name="ShapeKindBox" HorizontalAlignment="Stretch"/>
+                                            <TextBlock Grid.Row="1" Text="Fill" VerticalAlignment="Center"/>
+                                            <Grid Grid.Row="1" Grid.Column="1" ColumnDefinitions="28,*" ColumnSpacing="4">
+                                                <Border x:Name="ShapeFillSwatch" BorderBrush="#888" BorderThickness="1" Width="24" Height="24"/>
+                                                <TextBox Grid.Column="1" x:Name="ShapeFillBox"/>
+                                            </Grid>
+                                            <TextBlock Grid.Row="2" Text="Border" VerticalAlignment="Center"/>
+                                            <Grid Grid.Row="2" Grid.Column="1" ColumnDefinitions="28,*" ColumnSpacing="4">
+                                                <Border x:Name="ShapeBorderSwatch" BorderBrush="#888" BorderThickness="1" Width="24" Height="24"/>
+                                                <TextBox Grid.Column="1" x:Name="ShapeBorderColorBox"/>
+                                            </Grid>
+                                            <TextBlock Grid.Row="3" Text="Border thick" VerticalAlignment="Center"/>
+                                            <TextBox Grid.Row="3" Grid.Column="1" x:Name="ShapeBorderThicknessBox"/>
+                                            <TextBlock Grid.Row="4" Text="Corner radius" VerticalAlignment="Center"/>
+                                            <TextBox Grid.Row="4" Grid.Column="1" x:Name="ShapeCornerRadiusBox"/>
+                                        </Grid>
+                                    </StackPanel>
+
+                                    <StackPanel x:Name="TextElementEditor" IsVisible="False" Spacing="4">
+                                        <Grid ColumnDefinitions="100,*" RowDefinitions="Auto,Auto,Auto,Auto,Auto,Auto,Auto,Auto" RowSpacing="3" ColumnSpacing="4">
+                                            <TextBlock Text="Font family" VerticalAlignment="Center"/>
+                                            <TextBox Grid.Column="1" x:Name="TextFontFamilyBox"/>
+                                            <TextBlock Grid.Row="1" Text="Font size" VerticalAlignment="Center"/>
+                                            <TextBox Grid.Row="1" Grid.Column="1" x:Name="TextFontSizeBox"/>
+                                            <TextBlock Grid.Row="2" Text="Style" VerticalAlignment="Center"/>
+                                            <StackPanel Grid.Row="2" Grid.Column="1" Orientation="Horizontal" Spacing="12">
+                                                <CheckBox x:Name="TextBoldBox" Content="Bold"/>
+                                                <CheckBox x:Name="TextItalicBox" Content="Italic"/>
+                                            </StackPanel>
+                                            <TextBlock Grid.Row="3" Text="Color" VerticalAlignment="Center"/>
+                                            <Grid Grid.Row="3" Grid.Column="1" ColumnDefinitions="28,*" ColumnSpacing="4">
+                                                <Border x:Name="TextColorSwatch" BorderBrush="#888" BorderThickness="1" Width="24" Height="24"/>
+                                                <TextBox Grid.Column="1" x:Name="TextColorBox"/>
+                                            </Grid>
+                                            <TextBlock Grid.Row="4" Text="H Align" VerticalAlignment="Center"/>
+                                            <ComboBox Grid.Row="4" Grid.Column="1" x:Name="TextHAlignBox" HorizontalAlignment="Stretch"/>
+                                            <TextBlock Grid.Row="5" Text="V Align" VerticalAlignment="Center"/>
+                                            <ComboBox Grid.Row="5" Grid.Column="1" x:Name="TextVAlignBox" HorizontalAlignment="Stretch"/>
+                                            <TextBlock Grid.Row="6" Text="Line spacing" VerticalAlignment="Center"/>
+                                            <TextBox Grid.Row="6" Grid.Column="1" x:Name="TextLineSpacingBox"/>
+                                            <TextBlock Grid.Row="7" Text="Default text" VerticalAlignment="Top"/>
+                                            <TextBox Grid.Row="7" Grid.Column="1" x:Name="TextDefaultTextBox" AcceptsReturn="True" Height="60"/>
+                                        </Grid>
+                                    </StackPanel>
+                                </StackPanel>
+
+                                <Expander Header="Advanced (JSON)" IsExpanded="False" Margin="0,4,0,0">
+                                    <StackPanel Spacing="4">
+                                        <TextBox x:Name="TemplateJsonBox" AcceptsReturn="True" Height="170" TextWrapping="NoWrap" FontFamily="Consolas"/>
+                                        <Button x:Name="ApplyTemplateJsonButton" Content="Apply JSON"/>
+                                    </StackPanel>
+                                </Expander>
                             </StackPanel>
-                        </StackPanel>
+                        </ScrollViewer>
                         <ListBox x:Name="TemplatesList">
                             <ListBox.ItemTemplate>
                                 <DataTemplate DataType="model:Template">
