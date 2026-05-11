@@ -6,13 +6,13 @@ namespace VideoEmpty.UI;
 public class TextEntryDialog : Window
 {
     private readonly TextBox _box;
-    public TextEntryDialog(string prompt)
+    public TextEntryDialog(string prompt, string title = "Enter text", string initialText = "")
     {
-        Title = "Enter text";
+        Title = title;
         Width = 420; Height = 220;
         var ok = new Button { Content = "OK", IsDefault = true };
         var cancel = new Button { Content = "Cancel", IsCancel = true };
-        _box = new TextBox { AcceptsReturn = true, Height = 100 };
+        _box = new TextBox { AcceptsReturn = true, Height = 100, Text = initialText };
 
         var panel = new DockPanel { Margin = new Avalonia.Thickness(10) };
         var label = new TextBlock { Text = prompt, Margin = new Avalonia.Thickness(0,0,0,6) };

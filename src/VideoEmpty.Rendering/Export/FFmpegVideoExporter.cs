@@ -93,7 +93,7 @@ public sealed class FFmpegVideoExporter : IVideoExporter
 
             var psi = new ProcessStartInfo(_bin.FFmpegPath)
             {
-                RedirectStandardOutput = true,
+                RedirectStandardOutput = false,
                 RedirectStandardError = true,
                 UseShellExecute = false,
                 CreateNoWindow = true
@@ -109,16 +109,27 @@ public sealed class FFmpegVideoExporter : IVideoExporter
             }
             if (p is null) throw new InvalidOperationException("Failed to start ffmpeg.");
             using var _ = p;
-            var stderrTask = p.StandardError.ReadToEndAsync();
+            var stderr = new StringBuilder();
+            var stderrTask = Task.Run(async () =>
+            {
+                while (true)
+                {
+                    var line = await p.StandardError.ReadLineAsync().ConfigureAwait(false);
+                    if (line is null) break;
+                    stderr.AppendLine(line);
+                    UpdateProgress(line, project.VideoDurationMs, job.Status);
+                }
+            });
             using var reg = job.Cts.Token.Register(() => { try { p.Kill(true); } catch { } });
 
             await p.WaitForExitAsync(job.Cts.Token).ConfigureAwait(false);
-            var stderr = await stderrTask.ConfigureAwait(false);
+            await stderrTask.ConfigureAwait(false);
             if (p.ExitCode != 0)
             {
-                VideoEmpty.Core.Diagnostics.Log.Error("ffmpeg-export", $"exit={p.ExitCode} stderr={stderr}");
+                var stderrText = stderr.ToString();
+                VideoEmpty.Core.Diagnostics.Log.Error("ffmpeg-export", $"exit={p.ExitCode} stderr={stderrText}");
                 job.Status.State = JobState.Failed;
-                job.Status.Error = stderr;
+                job.Status.Error = stderrText;
                 return;
             }
 
@@ -154,10 +165,10 @@ public sealed class FFmpegVideoExporter : IVideoExporter
         {
             args.Add("-filter_complex");
             args.Add(filter);
-            args.Add("-map"); args.Add(lastVideoLabel);
+            args.Add("-map"); args.Add($"[{lastVideoLabel}]");
             if (lastAudioLabel != null)
             {
-                args.Add("-map"); args.Add(lastAudioLabel);
+                args.Add("-map"); args.Add($"[{lastAudioLabel}]");
             }
             else
             {
@@ -166,6 +177,8 @@ public sealed class FFmpegVideoExporter : IVideoExporter
         }
 
         args.Add("-c:v"); args.Add(options.VideoCodec);
+        args.Add("-progress"); args.Add("pipe:2");
+        args.Add("-nostats");
         if (options.Crf is { } crf) { args.Add("-crf"); args.Add(crf.ToString(CultureInfo.InvariantCulture)); }
         if (options.VideoBitrateKbps is { } br) { args.Add("-b:v"); args.Add($"{br}k"); }
         args.Add("-c:a"); args.Add(options.AudioCodec);
@@ -173,6 +186,27 @@ public sealed class FFmpegVideoExporter : IVideoExporter
         args.Add("-shortest");
         args.Add(options.OutputPath);
         return args;
+    }
+
+    private static void UpdateProgress(string line, int durationMs, JobStatus status)
+    {
+        if (durationMs <= 0) return;
+        if (line.StartsWith("out_time=", StringComparison.Ordinal))
+        {
+            var raw = line["out_time=".Length..].Trim();
+            if (TimeSpan.TryParse(raw, CultureInfo.InvariantCulture, out var ts))
+            {
+                var p = Math.Clamp(ts.TotalMilliseconds / durationMs, 0.0, 0.99);
+                status.Progress = Math.Max(status.Progress, p);
+                status.Message = $"Encoding video ({ts:mm\\:ss}/{TimeSpan.FromMilliseconds(durationMs):mm\\:ss})";
+            }
+            return;
+        }
+        if (line.StartsWith("progress=", StringComparison.Ordinal) &&
+            string.Equals(line["progress=".Length..].Trim(), "end", StringComparison.OrdinalIgnoreCase))
+        {
+            status.Progress = 1.0;
+        }
     }
 
     private static string BuildFilterComplex(Project project, int overlayCount, out string lastVideoLabel, out string? lastAudioLabel)
