@@ -18,10 +18,61 @@
             <Setter Property="MinWidth" Value="0"/>
             <Setter Property="FontSize" Value="12"/>
         </Style>
+        <Style Selector="Button#DashboardInstallDepsButton">
+            <Setter Property="Background" Value="#6E5311"/>
+            <Setter Property="Foreground" Value="White"/>
+            <Setter Property="BorderBrush" Value="#E2BD5A"/>
+        </Style>
+        <Style Selector="Button#DashboardInstallDepsButton:pointerover">
+            <Setter Property="Background" Value="#826116"/>
+            <Setter Property="Foreground" Value="White"/>
+            <Setter Property="BorderBrush" Value="#F0CC72"/>
+        </Style>
+        <Style Selector="Button#DashboardInstallDepsButton:pressed">
+            <Setter Property="Background" Value="#5A430D"/>
+            <Setter Property="Foreground" Value="White"/>
+            <Setter Property="BorderBrush" Value="#D0A945"/>
+        </Style>
+        <Style Selector="Button#DashboardInstallDepsButton /template/ ContentPresenter">
+            <Setter Property="TextElement.Foreground" Value="White"/>
+        </Style>
+        <Style Selector="Button#DashboardInstallDepsButton:pointerover /template/ ContentPresenter">
+            <Setter Property="TextElement.Foreground" Value="White"/>
+        </Style>
+        <Style Selector="Button#DashboardInstallDepsButton:pressed /template/ ContentPresenter">
+            <Setter Property="TextElement.Foreground" Value="White"/>
+        </Style>
+        <Style Selector="ProgressBar#DashboardInstallProgress">
+            <Setter Property="Background" Value="#2F2409"/>
+            <Setter Property="Foreground" Value="#FFD675"/>
+            <Setter Property="BorderBrush" Value="#E2BD5A"/>
+            <Setter Property="BorderThickness" Value="1"/>
+            <Setter Property="MinWidth" Value="280"/>
+            <Setter Property="Height" Value="12"/>
+        </Style>
     </Window.Styles>
     <Grid>
         <DockPanel x:Name="DashboardRoot" IsVisible="True" Margin="12">
             <TextBlock DockPanel.Dock="Top" Text="VideoEmpty Dashboard" FontSize="26" FontWeight="Bold" Margin="0,0,0,10"/>
+            <Border x:Name="DashboardDependencyPanel" DockPanel.Dock="Top" IsVisible="False"
+                    Background="#4A3B12" BorderBrush="#C89A2B" BorderThickness="1"
+                    Padding="10" Margin="0,0,0,10">
+                <StackPanel Spacing="8">
+                    <TextBlock x:Name="DashboardDependencyMessage"
+                               Text="FFmpeg is required before you can create or open projects."
+                               FontWeight="SemiBold"
+                               Foreground="White"/>
+                    <StackPanel Orientation="Horizontal" Spacing="8">
+                        <Button x:Name="DashboardInstallDepsButton"
+                                Content="Install missing library…"
+                                />
+                        <TextBlock x:Name="DashboardInstallStatus"
+                                   VerticalAlignment="Center"
+                                   Foreground="White"/>
+                    </StackPanel>
+                    <ProgressBar x:Name="DashboardInstallProgress" IsVisible="False" IsIndeterminate="True"/>
+                </StackPanel>
+            </Border>
             <StackPanel DockPanel.Dock="Top" Orientation="Horizontal" Spacing="8" Margin="0,0,0,10">
                 <Button x:Name="DashboardNewProjectButton" Content="New Project…"/>
                 <Button x:Name="DashboardOpenProjectButton" Content="Open Project…"/>
@@ -277,7 +328,10 @@
                         </StackPanel>
                     </StackPanel>
                     <Border Background="#111">
-                        <Image x:Name="PreviewImage" Stretch="Uniform"/>
+                        <Grid>
+                            <Image x:Name="PreviewImage" Stretch="Uniform"/>
+                            <Canvas x:Name="PlacementOverlay" IsHitTestVisible="False"/>
+                        </Grid>
                     </Border>
                 </DockPanel>
 

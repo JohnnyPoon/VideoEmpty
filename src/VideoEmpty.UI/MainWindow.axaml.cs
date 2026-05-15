@@ -15,6 +15,9 @@ using Avalonia.Media.Imaging;
 using Avalonia.Platform.Storage;
 using Avalonia.Threading;
 using Avalonia.VisualTree;
+using EllipseShape = Avalonia.Controls.Shapes.Ellipse;
+using LineShape = Avalonia.Controls.Shapes.Line;
+using RectangleShape = Avalonia.Controls.Shapes.Rectangle;
 using AvaloniaMedia = Avalonia.Media;
 using VideoEmpty.Core.Api;
 using VideoEmpty.Core.Diagnostics;
@@ -34,6 +37,8 @@ public partial class MainWindow : Window
     private int _currentTimeMs;
     private DispatcherTimer? _playTimer;
     private bool _isApplyingProject;
+    private (double x, double y)? _previewHoverNormalized;
+    private bool _dependenciesMissing;
 
     private bool _compactMode;
     private bool _showLeftPanel = true;
@@ -85,6 +90,7 @@ public partial class MainWindow : Window
         CompactOverlayCloseButton.Click += OnCompactOverlayClose;
         CompactOverlayExpandButton.Click += OnCompactOverlayExpand;
         InstallDepsButton.Click += OnInstallDeps;
+        DashboardInstallDepsButton.Click += OnInstallDeps;
         OpenLogButton.Click += (_, _) => OpenInShell(Log.LogPath);
 
         DashboardNewProjectButton.Click += OnNewProject;
@@ -117,11 +123,15 @@ public partial class MainWindow : Window
             {
                 _armedTemplateId = null;
                 ArmedLabel.Text = "(none armed)";
+                _previewHoverNormalized = null;
             }
+            RenderPlacementOverlay();
             UpdateTemplateEditor();
         };
 
         PreviewImage.PointerPressed += OnPreviewClicked;
+        PreviewImage.PointerMoved += OnPreviewPointerMoved;
+        PreviewImage.PointerExited += OnPreviewPointerExited;
         InstancesList.SelectionChanged += (_, _) => UpdateInstanceEditor();
         DeleteInstanceButton.Click += OnDeleteInstance;
         PreviewInstanceButton.Click += OnPreviewInstance;
@@ -152,6 +162,7 @@ public partial class MainWindow : Window
             _project = project;
             _projectPath = path;
             _currentTimeMs = 0;
+            _previewHoverNormalized = null;
             TimeSlider.Value = 0;
             TimeSlider.Maximum = Math.Max(1, _project.VideoDurationMs);
             VideoInfoLabel.Text = string.IsNullOrWhiteSpace(_project.VideoPath)
@@ -284,8 +295,11 @@ public partial class MainWindow : Window
         if (!ok) return;
         _settings.AutoDeleteBackupsEnabled = dlg.EnableAutoDelete == true;
         _settings.AutoDeleteBackupsDays = Math.Max(1, dlg.AutoDeleteDays ?? 90);
+        _settings.SnapToGridEnabled = dlg.SnapToGridEnabled == true;
+        _settings.SnapGridDivisions = Math.Max(2, dlg.SnapGridDivisions ?? 10);
         UiSettingsStore.Save(_settings);
         CleanupBackups();
+        RenderPlacementOverlay();
         ExportStatus.Text = "Settings saved.";
     }
 
@@ -349,6 +363,7 @@ public partial class MainWindow : Window
     private (double centerX, double centerY, Animation? animationOverride) ResolveClickPlacement(
         Template template, double clickX, double clickY)
     {
+        (clickX, clickY) = ApplySnapToGrid(clickX, clickY);
         var anim = template.Animation;
         bool horizontalTemplate = IsHorizontalSlide(anim.Enter) || IsHorizontalSlide(anim.Exit);
         if (!horizontalTemplate || _project.VideoResolution.Width <= 0 || _project.VideoResolution.Height <= 0)
@@ -373,18 +388,34 @@ public partial class MainWindow : Window
         {
             var statuses = await _api.Dependencies.CheckAsync();
             var missing = statuses.Where(s => s.State != DependencyState.Installed).Select(s => s.Name).ToList();
+            _dependenciesMissing = missing.Count > 0;
             InstallDepsButton.IsVisible = missing.Count > 0;
-            if (missing.Count == 0) return;
-            if (!promptIfMissing) return;
-            var confirm = await ConfirmDialog.ShowAsync(this,
-                "FFmpeg required",
-                $"VideoEmpty needs FFmpeg. Missing: {string.Join(", ", missing)}.\nInstall now?");
-            if (confirm) await InstallDepsAsync();
+            DashboardDependencyPanel.IsVisible = _dependenciesMissing;
+            if (_dependenciesMissing)
+            {
+                DashboardDependencyMessage.Text = $"Missing dependency: {string.Join(", ", missing)}. Install it to continue.";
+                DashboardInstallStatus.Text = "";
+            }
+            else
+            {
+                DashboardInstallProgress.IsVisible = false;
+                DashboardInstallStatus.Text = "";
+            }
+
+            DashboardNewProjectButton.IsEnabled = !_dependenciesMissing;
+            DashboardOpenProjectButton.IsEnabled = !_dependenciesMissing;
+            DashboardOpenLogButton.IsEnabled = !_dependenciesMissing;
+            RecentProjectsList.IsEnabled = !_dependenciesMissing;
+            DashboardInstallDepsButton.IsEnabled = _dependenciesMissing;
         }
         catch (Exception ex)
         {
             Log.Error("UI", "Dependency check failed", ex);
             VideoInfoLabel.Text = $"Dependency check failed: {ex.Message}";
+            DashboardDependencyPanel.IsVisible = true;
+            DashboardDependencyMessage.Text = $"Dependency check failed: {ex.Message}";
+            DashboardInstallStatus.Text = "";
+            DashboardInstallProgress.IsVisible = false;
         }
     }
 
@@ -393,21 +424,38 @@ public partial class MainWindow : Window
     private async Task InstallDepsAsync()
     {
         InstallDepsButton.IsEnabled = false;
-        var progress = new Progress<DependencyInstallProgress>(p => ExportStatus.Text = $"Install {p.Name}: {p.Stage} {p.Detail}".Trim());
+        DashboardInstallDepsButton.IsEnabled = false;
+        DashboardInstallProgress.IsVisible = true;
+        DashboardInstallStatus.Text = "Installing...";
+        var progress = new Progress<DependencyInstallProgress>(p =>
+        {
+            var text = $"Install {p.Name}: {p.Stage} {p.Detail}".Trim();
+            ExportStatus.Text = text;
+            DashboardInstallStatus.Text = text;
+        });
         try
         {
             await _api.Dependencies.InstallMissingAsync(progress);
-            await CheckDependenciesAsync(promptIfMissing: false);
             ExportStatus.Text = "Install complete.";
+            DashboardInstallStatus.Text = "Install complete.";
+        }
+        catch (OperationCanceledException)
+        {
+            ExportStatus.Text = "Install interrupted. You can retry.";
+            DashboardInstallStatus.Text = "Install interrupted. You can retry.";
         }
         catch (Exception ex)
         {
             Log.Error("UI", "Install failed", ex);
             ExportStatus.Text = $"Install failed: {ex.Message}";
+            DashboardInstallStatus.Text = $"Install failed: {ex.Message}";
         }
         finally
         {
+            await CheckDependenciesAsync(promptIfMissing: false);
             InstallDepsButton.IsEnabled = true;
+            DashboardInstallProgress.IsVisible = false;
+            DashboardInstallDepsButton.IsEnabled = _dependenciesMissing;
         }
     }
 
@@ -509,6 +557,7 @@ public partial class MainWindow : Window
             PreviewImage.Source = new Bitmap(ms);
             TimeLabel.Text = $"{_currentTimeMs} ms";
             PlaybackTimeLabel.Text = $"{FormatTime(_currentTimeMs)} / {FormatTime(_project.VideoDurationMs)}";
+            RenderPlacementOverlay();
         }
         catch (Exception ex)
         {
@@ -517,12 +566,128 @@ public partial class MainWindow : Window
         }
     }
 
+    private (double x, double y) GetNormalizedPreviewPoint(Avalonia.Point pos)
+    {
+        double width = Math.Max(1, PreviewImage.Bounds.Width);
+        double height = Math.Max(1, PreviewImage.Bounds.Height);
+        double cx = Math.Clamp(pos.X / width, 0, 1);
+        double cy = Math.Clamp(pos.Y / height, 0, 1);
+        return (cx, cy);
+    }
+
+    private (double x, double y) ApplySnapToGrid(double x, double y)
+    {
+        if (!_settings.SnapToGridEnabled) return (x, y);
+        int divisions = Math.Max(2, _settings.SnapGridDivisions);
+        double step = 1.0 / divisions;
+        double snappedX = Math.Clamp(Math.Round(x / step) * step, 0, 1);
+        double snappedY = Math.Clamp(Math.Round(y / step) * step, 0, 1);
+        return (snappedX, snappedY);
+    }
+
+    private void OnPreviewPointerMoved(object? sender, PointerEventArgs e)
+    {
+        if (_armedTemplateId is null || PreviewImage.Source is null)
+        {
+            _previewHoverNormalized = null;
+            RenderPlacementOverlay();
+            return;
+        }
+
+        _previewHoverNormalized = GetNormalizedPreviewPoint(e.GetPosition(PreviewImage));
+        RenderPlacementOverlay();
+    }
+
+    private void OnPreviewPointerExited(object? sender, PointerEventArgs e)
+    {
+        _previewHoverNormalized = null;
+        RenderPlacementOverlay();
+    }
+
+    private void RenderPlacementOverlay()
+    {
+        PlacementOverlay.Children.Clear();
+
+        if (PreviewImage.Source is null) return;
+        double width = PreviewImage.Bounds.Width;
+        double height = PreviewImage.Bounds.Height;
+        if (width <= 1 || height <= 1) return;
+
+        PlacementOverlay.Width = width;
+        PlacementOverlay.Height = height;
+
+        if (_settings.SnapToGridEnabled)
+        {
+            int divisions = Math.Max(2, _settings.SnapGridDivisions);
+            var gridBrush = new AvaloniaMedia.SolidColorBrush(AvaloniaMedia.Color.FromArgb(70, 255, 255, 255));
+            for (int i = 1; i < divisions; i++)
+            {
+                double x = i * width / divisions;
+                double y = i * height / divisions;
+                PlacementOverlay.Children.Add(new LineShape
+                {
+                    StartPoint = new Avalonia.Point(x, 0),
+                    EndPoint = new Avalonia.Point(x, height),
+                    Stroke = gridBrush,
+                    StrokeThickness = 1
+                });
+                PlacementOverlay.Children.Add(new LineShape
+                {
+                    StartPoint = new Avalonia.Point(0, y),
+                    EndPoint = new Avalonia.Point(width, y),
+                    Stroke = gridBrush,
+                    StrokeThickness = 1
+                });
+            }
+        }
+
+        if (_armedTemplateId is null || _previewHoverNormalized is not { } hover) return;
+        var template = _project.Templates.FirstOrDefault(t => t.Id == _armedTemplateId);
+        if (template is null) return;
+
+        var placement = ResolveClickPlacement(template, hover.x, hover.y);
+        double centerX = placement.centerX * width;
+        double centerY = placement.centerY * height;
+
+        double previewWidth = _project.VideoResolution.Width > 0
+            ? (template.Width / (double)_project.VideoResolution.Width) * width
+            : 0;
+        double previewHeight = _project.VideoResolution.Height > 0
+            ? (template.Height / (double)_project.VideoResolution.Height) * height
+            : 0;
+
+        previewWidth = Math.Clamp(previewWidth, 4, width);
+        previewHeight = Math.Clamp(previewHeight, 4, height);
+
+        var rect = new RectangleShape
+        {
+            Width = previewWidth,
+            Height = previewHeight,
+            StrokeThickness = 2,
+            Stroke = new AvaloniaMedia.SolidColorBrush(AvaloniaMedia.Color.FromArgb(220, 72, 197, 255)),
+            Fill = new AvaloniaMedia.SolidColorBrush(AvaloniaMedia.Color.FromArgb(40, 72, 197, 255)),
+            RadiusX = 4,
+            RadiusY = 4
+        };
+        Canvas.SetLeft(rect, centerX - previewWidth / 2);
+        Canvas.SetTop(rect, centerY - previewHeight / 2);
+        PlacementOverlay.Children.Add(rect);
+
+        var centerDot = new EllipseShape
+        {
+            Width = 8,
+            Height = 8,
+            Fill = new AvaloniaMedia.SolidColorBrush(AvaloniaMedia.Color.FromArgb(255, 72, 197, 255))
+        };
+        Canvas.SetLeft(centerDot, centerX - 4);
+        Canvas.SetTop(centerDot, centerY - 4);
+        PlacementOverlay.Children.Add(centerDot);
+    }
+
     private async void OnPreviewClicked(object? sender, PointerPressedEventArgs e)
     {
         if (_armedTemplateId is null || PreviewImage.Source is null) return;
-        var pos = e.GetPosition(PreviewImage);
-        double cx = Math.Clamp(pos.X / Math.Max(1, PreviewImage.Bounds.Width), 0, 1);
-        double cy = Math.Clamp(pos.Y / Math.Max(1, PreviewImage.Bounds.Height), 0, 1);
+        var (cx, cy) = GetNormalizedPreviewPoint(e.GetPosition(PreviewImage));
 
         if (_playTimer is { IsEnabled: true }) TogglePlay();
 
@@ -1647,6 +1812,7 @@ public partial class MainWindow : Window
         _armedTemplateId = templateId;
         var template = _api.GetTemplate(_project, templateId);
         ArmedLabel.Text = $"Armed: {template.Name} (click video to add)";
+        RenderPlacementOverlay();
     }
 
     private async Task PollJob(string jobId)

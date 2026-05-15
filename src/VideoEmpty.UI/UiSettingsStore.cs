@@ -13,6 +13,8 @@ public sealed class UiSettings
     public List<string> RecentProjects { get; set; } = new();
     public bool AutoDeleteBackupsEnabled { get; set; }
     public int AutoDeleteBackupsDays { get; set; } = 90;
+    public bool SnapToGridEnabled { get; set; }
+    public int SnapGridDivisions { get; set; } = 10;
 }
 
 public static class UiSettingsStore

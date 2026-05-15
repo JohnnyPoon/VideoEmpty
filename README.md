@@ -66,5 +66,7 @@ dotnet run --project src/VideoEmpty.Mcp
 1. Pause / scrub to the desired time.
 2. Click a template in the left palette (it becomes "armed").
 3. Click on the video preview → text dialog appears (multi-line; lines map to text elements top-to-bottom).
-4. The instance is added with its **center** at the click point and the template's default duration.
+4. The instance is added with its **center** at the click point (or nearest snap point when snap-to-grid is enabled) and the template's default duration.
 5. Edit start/duration/position/text in the right panel; export to MP4 when done.
+
+The **Settings** dialog includes placement options for **Snap to grid** and **Snap points per axis** (e.g. `10` splits width/height into 10 steps). When a template is armed, the preview shows a live placement box on the video frame before you click.

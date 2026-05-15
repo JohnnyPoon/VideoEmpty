@@ -98,12 +98,17 @@ public sealed class FFmpegDependencyManager : IDependencyManager
         var (stdout, stderr, code) = await ProcessHelper.RunAsync(winget, args, ct,
             line => progress?.Report(new DependencyInstallProgress { Name = "ffmpeg", Stage = "installing", Detail = line }));
         Log.Info("winget", $"exit={code}\nstdout:\n{stdout}\nstderr:\n{stderr}");
-        if (code != 0)
+        if (code != 0 && IsInstallationInterrupted(stdout, stderr))
+            throw new OperationCanceledException("Installation was interrupted. You can retry.");
+        if (code != 0 && !IsAlreadyInstalledNoUpgrade(stdout, stderr))
             throw new InvalidOperationException($"winget failed (exit {code}): {(string.IsNullOrWhiteSpace(stderr) ? stdout : stderr)}");
+        if (code != 0)
+            progress?.Report(new DependencyInstallProgress { Name = "ffmpeg", Stage = "already installed", Detail = "No upgrade available." });
 
         // winget alters PATH for new processes, but the current process won't see it.
         // Try to locate the freshly installed binaries and update PATH for this process.
         TryRefreshProcessPathFromRegistry();
+        AddWindowsFfmpegHintPaths();
         var refreshed = FFmpegBinaries.Discover();
         if (!refreshed.FFmpegFound || !refreshed.FFprobeFound)
         {
@@ -114,7 +119,54 @@ public sealed class FFmpegDependencyManager : IDependencyManager
                 Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Microsoft", "WindowsApps")
             };
             AddPaths(hints);
+            AddWindowsFfmpegHintPaths();
         }
+    }
+
+    private static bool IsAlreadyInstalledNoUpgrade(string stdout, string stderr)
+    {
+        var text = (stdout + "\n" + stderr).ToLowerInvariant();
+        bool alreadyInstalled = text.Contains("found an existing package already installed");
+        bool noUpgrade =
+            text.Contains("no available upgrade found") ||
+            text.Contains("no newer package versions are available");
+        return alreadyInstalled && noUpgrade;
+    }
+
+    private static bool IsInstallationInterrupted(string stdout, string stderr)
+    {
+        var text = (stdout + "\n" + stderr).ToLowerInvariant();
+        return text.Contains("cancelled") ||
+               text.Contains("canceled") ||
+               text.Contains("terminated") ||
+               text.Contains("operation canceled") ||
+               text.Contains("operation cancelled");
+    }
+
+    private static void AddWindowsFfmpegHintPaths()
+    {
+        if (!OperatingSystem.IsWindows()) return;
+
+        var hints = new List<string>();
+        var localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+        var winGetPackages = Path.Combine(localAppData, "Microsoft", "WinGet", "Packages");
+        if (Directory.Exists(winGetPackages))
+        {
+            foreach (var packageDir in Directory.EnumerateDirectories(winGetPackages, "Gyan.FFmpeg*"))
+            {
+                foreach (var ffmpegExe in Directory.EnumerateFiles(packageDir, "ffmpeg.exe", SearchOption.AllDirectories))
+                {
+                    var binDir = Path.GetDirectoryName(ffmpegExe);
+                    if (!string.IsNullOrWhiteSpace(binDir)) hints.Add(binDir);
+                }
+            }
+        }
+
+        var programFiles = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles);
+        var commonBin = Path.Combine(programFiles, "ffmpeg", "bin");
+        if (Directory.Exists(commonBin)) hints.Add(commonBin);
+
+        AddPaths(hints);
     }
 
     private static void TryRefreshProcessPathFromRegistry()
