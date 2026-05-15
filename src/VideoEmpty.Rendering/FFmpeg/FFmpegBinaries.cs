@@ -21,10 +21,15 @@ public class FFmpegBinaries
     {
         var ffmpegEnv  = Environment.GetEnvironmentVariable("VIDEOEMPTY_FFMPEG");
         var ffprobeEnv = Environment.GetEnvironmentVariable("VIDEOEMPTY_FFPROBE");
-        var ffmpegPath  = ffmpegEnv  ?? Which("ffmpeg")  ?? "ffmpeg";
-        var ffprobePath = ffprobeEnv ?? Which("ffprobe") ?? "ffprobe";
-        bool ffmpegFound  = ffmpegEnv  is not null ? File.Exists(ffmpegEnv)  : Which("ffmpeg")  is not null;
-        bool ffprobeFound = ffprobeEnv is not null ? File.Exists(ffprobeEnv) : Which("ffprobe") is not null;
+        var ffmpegWhich = Which("ffmpeg");
+        var ffprobeWhich = Which("ffprobe");
+        var ffmpegWinget = OperatingSystem.IsWindows() ? FindWindowsWingetBinary("ffmpeg.exe") : null;
+        var ffprobeWinget = OperatingSystem.IsWindows() ? FindWindowsWingetBinary("ffprobe.exe") : null;
+
+        var ffmpegPath  = ffmpegEnv  ?? ffmpegWhich  ?? ffmpegWinget  ?? "ffmpeg";
+        var ffprobePath = ffprobeEnv ?? ffprobeWhich ?? ffprobeWinget ?? "ffprobe";
+        bool ffmpegFound  = ffmpegEnv  is not null ? File.Exists(ffmpegEnv)  : ffmpegWhich  is not null || ffmpegWinget  is not null;
+        bool ffprobeFound = ffprobeEnv is not null ? File.Exists(ffprobeEnv) : ffprobeWhich is not null || ffprobeWinget is not null;
         VideoEmpty.Core.Diagnostics.Log.Info("FFmpegBinaries",
             $"ffmpeg='{ffmpegPath}' (found={ffmpegFound}); ffprobe='{ffprobePath}' (found={ffprobeFound})");
         return new FFmpegBinaries(ffmpegPath, ffprobePath, ffmpegFound, ffprobeFound);
@@ -66,6 +71,32 @@ public class FFmpegBinaries
             }
             catch { }
         }
+        return null;
+    }
+
+    private static string? FindWindowsWingetBinary(string exeName)
+    {
+        if (!OperatingSystem.IsWindows()) return null;
+
+        var localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+        if (string.IsNullOrWhiteSpace(localAppData)) return null;
+
+        var winGetPackages = Path.Combine(localAppData, "Microsoft", "WinGet", "Packages");
+        if (!Directory.Exists(winGetPackages)) return null;
+
+        try
+        {
+            foreach (var packageDir in Directory.EnumerateDirectories(winGetPackages, "Gyan.FFmpeg*"))
+            {
+                var found = Directory.EnumerateFiles(packageDir, exeName, SearchOption.AllDirectories).FirstOrDefault();
+                if (!string.IsNullOrWhiteSpace(found)) return found;
+            }
+        }
+        catch
+        {
+            // Ignore search failures and continue with standard PATH detection.
+        }
+
         return null;
     }
 }
