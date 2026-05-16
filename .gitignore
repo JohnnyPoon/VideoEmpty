@@ -35,3 +35,6 @@ artifacts/
 # OS
 .DS_Store
 Thumbs.db
+
+copilot-session-*.md
+
