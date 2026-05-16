@@ -11,7 +11,11 @@ public enum CapCutExportMode
 public sealed record CapCutExportOptions(
     string ProjectFolder,
     CapCutExportMode Mode = CapCutExportMode.CloneProject,
-    string? CloneSuffix = null);
+    string? CloneSuffix = null,
+    /// <summary>Add a CapCut "Left Slide-In" animation to every emitted segment so they animate on entry (matches the user's reference project).</summary>
+    bool IncludeSlideInAnimation = true,
+    /// <summary>If the target project already contains materials/segments emitted by a previous VideoEmpty export, remove them first so re-exports are idempotent rather than duplicating content.</summary>
+    bool ReplacePreviousExport = true);
 
 public sealed record CapCutExportResult(
     string ProjectFolder,
@@ -19,4 +23,5 @@ public sealed record CapCutExportResult(
     int TextMaterialsAdded,
     int ShapeMaterialsAdded,
     int SegmentsAdded,
-    string? BackupPath);
+    string? BackupPath,
+    int PreviousSegmentsRemoved = 0);

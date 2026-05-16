@@ -168,6 +168,140 @@ public class CapCutProjectExporterTests
         }
     }
 
+    [Fact]
+    public void EveryEmittedSegment_GetsSlideInAnimationReference()
+    {
+        var src = CreateMinimalProject();
+        try
+        {
+            var (proj, _) = BuildSampleProject();
+            var result = CapCutProjectExporter.Export(proj, new CapCutExportOptions(src, CapCutExportMode.CloneProject));
+            var root = JsonNode.Parse(File.ReadAllText(result.DraftContentPath))!.AsObject();
+
+            var anims = root["materials"]!["material_animations"]!.AsArray();
+            // One animation per segment.
+            Assert.Equal(result.SegmentsAdded, anims.Count);
+            // All are sticker_animation "in" Left Slide-In
+            foreach (var a in anims)
+            {
+                Assert.Equal("sticker_animation", a!["type"]!.GetValue<string>());
+                var inner = a["animations"]!.AsArray()[0]!;
+                Assert.Equal("in", inner["type"]!.GetValue<string>());
+                Assert.Equal("Left Slide-In", inner["name"]!.GetValue<string>());
+            }
+
+            // Each segment's extra_material_refs points to an existing animation id.
+            var animIds = new HashSet<string>(anims.Select(a => a!["id"]!.GetValue<string>()));
+            foreach (var t in root["tracks"]!.AsArray())
+            foreach (var s in t!.AsObject()["segments"]!.AsArray())
+            {
+                var refs = s!["extra_material_refs"]!.AsArray();
+                Assert.NotEmpty(refs);
+                Assert.Contains(refs[0]!.GetValue<string>(), animIds);
+            }
+        }
+        finally
+        {
+            TryDelete(src);
+        }
+    }
+
+    [Fact]
+    public void IncludeSlideInAnimation_False_EmitsNoAnimations()
+    {
+        var src = CreateMinimalProject();
+        try
+        {
+            var (proj, _) = BuildSampleProject();
+            var result = CapCutProjectExporter.Export(proj,
+                new CapCutExportOptions(src, CapCutExportMode.CloneProject, IncludeSlideInAnimation: false));
+            var root = JsonNode.Parse(File.ReadAllText(result.DraftContentPath))!.AsObject();
+            Assert.Empty(root["materials"]!["material_animations"]!.AsArray());
+            foreach (var t in root["tracks"]!.AsArray())
+            foreach (var s in t!.AsObject()["segments"]!.AsArray())
+                Assert.Empty(s!["extra_material_refs"]!.AsArray());
+        }
+        finally
+        {
+            TryDelete(src);
+        }
+    }
+
+    [Fact]
+    public void ReExport_ReplacesPriorVideoEmptyContent_NoDuplicates()
+    {
+        var src = CreateMinimalProject();
+        try
+        {
+            var (proj, _) = BuildSampleProject();
+
+            // 1st export: edit-in-place so the same folder is touched twice.
+            var first = CapCutProjectExporter.Export(proj, new CapCutExportOptions(src, CapCutExportMode.EditInPlace));
+            Assert.Equal(0, first.PreviousSegmentsRemoved);
+
+            // 2nd export: same project, same folder.
+            var second = CapCutProjectExporter.Export(proj, new CapCutExportOptions(src, CapCutExportMode.EditInPlace));
+            Assert.Equal(first.SegmentsAdded, second.PreviousSegmentsRemoved);
+
+            var root = JsonNode.Parse(File.ReadAllText(second.DraftContentPath))!.AsObject();
+            // After the 2nd export the totals match a single export, not double.
+            Assert.Equal(second.TextMaterialsAdded, root["materials"]!["texts"]!.AsArray().Count);
+            Assert.Equal(second.ShapeMaterialsAdded, root["materials"]!["shapes"]!.AsArray().Count);
+            int totalSegs = 0;
+            foreach (var t in root["tracks"]!.AsArray())
+                totalSegs += t!.AsObject()["segments"]!.AsArray().Count;
+            Assert.Equal(second.SegmentsAdded, totalSegs);
+        }
+        finally
+        {
+            TryDelete(src);
+        }
+    }
+
+    [Fact]
+    public void ReExport_PreservesUserAddedContent()
+    {
+        var src = CreateMinimalProject();
+        try
+        {
+            // Manually add a non-VideoEmpty segment+material that must survive a re-export.
+            var draftPath = Path.Combine(src, "draft_content.json");
+            var root = JsonNode.Parse(File.ReadAllText(draftPath))!.AsObject();
+            var userMaterialId = Guid.NewGuid().ToString("D").ToUpperInvariant();
+            root["materials"]!["texts"]!.AsArray().Add(new JsonObject
+            {
+                ["id"] = userMaterialId,
+                ["type"] = "text",
+                ["content"] = "user added",
+            });
+            root["tracks"]!.AsArray().Add(new JsonObject
+            {
+                ["type"] = "text",
+                ["segments"] = new JsonArray(new JsonObject
+                {
+                    ["id"] = Guid.NewGuid().ToString("D").ToUpperInvariant(),
+                    ["material_id"] = userMaterialId,
+                    ["group_id"] = "",
+                    ["target_timerange"] = new JsonObject { ["start"] = 0L, ["duration"] = 1000L },
+                }),
+            });
+            File.WriteAllText(draftPath, root.ToJsonString());
+
+            var (proj, _) = BuildSampleProject();
+            CapCutProjectExporter.Export(proj, new CapCutExportOptions(src, CapCutExportMode.EditInPlace));
+            CapCutProjectExporter.Export(proj, new CapCutExportOptions(src, CapCutExportMode.EditInPlace));
+
+            var after = JsonNode.Parse(File.ReadAllText(draftPath))!.AsObject();
+            // User-added material is still present.
+            Assert.Contains(after["materials"]!["texts"]!.AsArray(),
+                m => m!["id"]!.GetValue<string>() == userMaterialId);
+        }
+        finally
+        {
+            TryDelete(src);
+        }
+    }
+
     private static void TryDelete(string dir)
     {
         try

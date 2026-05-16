@@ -1838,7 +1838,8 @@ public partial class MainWindow : Window
             $"Add {_project.Instances.Count} template instance(s) to this CapCut project?\n\n" +
             "• Clone project (recommended): copies the folder and edits the copy.\n" +
             "• Edit in place: writes a .bak then modifies draft_content.json.\n\n" +
-            "Note: Template animations are not translated in this version.",
+            "Each emitted element will receive a 'Left Slide-In' entry animation.\n" +
+            "Any content from a previous VideoEmpty export will be replaced (not duplicated).",
             new[] { "Clone project", "Edit in place", "Cancel" });
         if (mode is null || mode == "Cancel") return;
 
@@ -1850,9 +1851,12 @@ public partial class MainWindow : Window
         {
             ExportStatus.Text = "Exporting to CapCut…";
             var result = await Task.Run(() => _api.ExportToCapCut(_project, options));
+            var replaced = result.PreviousSegmentsRemoved > 0
+                ? $", replaced {result.PreviousSegmentsRemoved} prior segment(s)"
+                : "";
             ExportStatus.Text =
                 $"CapCut export done → {Path.GetFileName(result.ProjectFolder)} " +
-                $"({result.TextMaterialsAdded} text, {result.ShapeMaterialsAdded} shape, {result.SegmentsAdded} segments)";
+                $"({result.TextMaterialsAdded} text, {result.ShapeMaterialsAdded} shape, {result.SegmentsAdded} segments{replaced})";
             try { System.Diagnostics.Process.Start("explorer.exe", $"\"{result.ProjectFolder}\""); } catch { }
         }
         catch (Exception ex)

@@ -16,12 +16,32 @@ namespace VideoEmpty.Rendering.Export.CapCut;
 /// Optional <see cref="CapCutExportMode.EditInPlace"/> writes a timestamped
 /// <c>.bak</c> next to the original first.
 ///
-/// Animations are intentionally NOT translated to CapCut animations in v1;
-/// each instance simply appears for its full duration.
+/// Animations: by default every emitted segment gets a CapCut "Left Slide-In"
+/// entry animation (the one the user's reference project uses on every Step /
+/// Comment). Disable via <see cref="CapCutExportOptions.IncludeSlideInAnimation"/>.
+///
+/// Idempotent re-export: every material / segment we emit is tagged with the
+/// well-known marker <see cref="OriginMarker"/>. When the user re-exports onto
+/// the same project, the prior VideoEmpty content is removed first
+/// (controlled by <see cref="CapCutExportOptions.ReplacePreviousExport"/>),
+/// so re-running does not duplicate items.
 /// </summary>
 public static class CapCutProjectExporter
 {
     private const string DraftContentName = "draft_content.json";
+
+    /// <summary>Marker string written into <c>group_id</c> on every segment we emit
+    /// and into the custom <c>videoempty_origin</c> field on every material we emit,
+    /// so a later export can recognise and replace prior content.</summary>
+    public const string OriginMarker = "videoempty";
+
+    // Resource metadata for CapCut's "Left Slide-In" entry animation (sticker_animation),
+    // observed in the user's reference project. Works for both text and sticker segments.
+    private const string SlideInResourceId = "7592161167426997505";
+    private const string SlideInName = "Left Slide-In";
+    private const string SlideInCategoryId = "ruchang";
+    private const string SlideInCategoryName = "In";
+    private const long SlideInDefaultUs = 300_000;   // 300 ms — matches reference
 
     public static CapCutExportResult Export(Project project, CapCutExportOptions options)
     {
@@ -53,8 +73,8 @@ public static class CapCutProjectExporter
             case CapCutExportMode.EditInPlace:
             {
                 workingFolder = options.ProjectFolder;
-                backupPath = Path.Combine(workingFolder,
-                    $"{DraftContentName}.videoempty.{DateTime.Now:yyyyMMdd-HHmmss}.bak");
+                backupPath = MakeUniquePath(Path.Combine(workingFolder,
+                    $"{DraftContentName}.videoempty.{DateTime.Now:yyyyMMdd-HHmmss-fff}.bak"));
                 File.Copy(originalDraft, backupPath, overwrite: false);
                 break;
             }
@@ -67,7 +87,7 @@ public static class CapCutProjectExporter
         var root = JsonNode.Parse(json) as JsonObject
                    ?? throw new InvalidDataException("draft_content.json root is not an object.");
 
-        var stats = PatchDraftContent(root, project);
+        var stats = PatchDraftContent(root, project, options);
 
         // Atomic write: temp file + replace.
         var tmp = draftPath + ".videoempty.tmp";
@@ -79,12 +99,13 @@ public static class CapCutProjectExporter
         return new CapCutExportResult(
             workingFolder, draftPath,
             stats.TextMaterials, stats.ShapeMaterials, stats.Segments,
-            backupPath);
+            backupPath,
+            stats.PreviousSegmentsRemoved);
     }
 
-    private record struct PatchStats(int TextMaterials, int ShapeMaterials, int Segments);
+    private record struct PatchStats(int TextMaterials, int ShapeMaterials, int Segments, int PreviousSegmentsRemoved);
 
-    private static PatchStats PatchDraftContent(JsonObject root, Project project)
+    private static PatchStats PatchDraftContent(JsonObject root, Project project, CapCutExportOptions options)
     {
         // ----- Canvas -----
         var canvas = root["canvas_config"] as JsonObject;
@@ -97,16 +118,24 @@ public static class CapCutProjectExporter
         var materials = root["materials"] as JsonObject ?? throw new InvalidDataException("materials missing.");
         var texts = GetOrCreateArray(materials, "texts");
         var shapes = GetOrCreateArray(materials, "shapes");
+        var materialAnimations = GetOrCreateArray(materials, "material_animations");
 
         // ----- Tracks: pick (or create) one text track and one sticker track -----
         var tracks = root["tracks"] as JsonArray ?? throw new InvalidDataException("tracks missing.");
+
+        int removedSegments = 0;
+        if (options.ReplacePreviousExport)
+        {
+            removedSegments = RemovePriorVideoEmptyContent(tracks, texts, shapes, materialAnimations);
+        }
+
         var textTrack = FindOrCreateTrack(tracks, "text");
         var stickerTrack = FindOrCreateTrack(tracks, "sticker");
 
         int baseRenderIndex = ComputeMaxRenderIndex(tracks) + 100;
         int renderIdx = baseRenderIndex;
 
-        var stats = new PatchStats(0, 0, 0);
+        var stats = new PatchStats(0, 0, 0, removedSegments);
 
         foreach (var instance in project.Instances)
         {
@@ -142,7 +171,10 @@ public static class CapCutProjectExporter
                 if (element is ShapeElement shape)
                 {
                     var (materialId, _) = AppendShapeMaterial(shapes, shape, elemPxW, elemPxH);
-                    var seg = BuildSegment(materialId, startUs, durationUs, tx, ty, renderIdx);
+                    string? animId = options.IncludeSlideInAnimation
+                        ? AppendSlideInAnimation(materialAnimations, durationUs)
+                        : null;
+                    var seg = BuildSegment(materialId, startUs, durationUs, tx, ty, renderIdx, animId);
                     stickerTrack["segments"]!.AsArray().Add(seg);
                     stats = stats with { ShapeMaterials = stats.ShapeMaterials + 1, Segments = stats.Segments + 1 };
                 }
@@ -150,7 +182,10 @@ public static class CapCutProjectExporter
                 {
                     var resolvedText = ResolveText(textEl, instance);
                     var (materialId, _) = AppendTextMaterial(texts, textEl, resolvedText, elemPxW, elemPxH);
-                    var seg = BuildSegment(materialId, startUs, durationUs, tx, ty, renderIdx);
+                    string? animId = options.IncludeSlideInAnimation
+                        ? AppendSlideInAnimation(materialAnimations, durationUs)
+                        : null;
+                    var seg = BuildSegment(materialId, startUs, durationUs, tx, ty, renderIdx, animId);
                     textTrack["segments"]!.AsArray().Add(seg);
                     stats = stats with { TextMaterials = stats.TextMaterials + 1, Segments = stats.Segments + 1 };
                 }
@@ -237,6 +272,7 @@ public static class CapCutProjectExporter
                 ["alpha"] = 1.0,
             },
             ["constant_material_id"] = "",
+            ["videoempty_origin"] = OriginMarker,
         };
         arr.Add(mat);
         return (id, mat);
@@ -438,15 +474,105 @@ public static class CapCutProjectExporter
             ["subtitle_keywords_config"] = null,
             ["sub_template_id"] = -1,
             ["translate_original_text"] = "",
+            ["videoempty_origin"] = OriginMarker,
         };
         arr.Add(mat);
         return (id, mat);
     }
 
+    // ---------- Animation builder ----------
+
+    /// <summary>Appends a CapCut "Left Slide-In" sticker_animation material and returns its id.
+    /// Works for both text and sticker segments (as in the reference project).</summary>
+    private static string AppendSlideInAnimation(JsonArray arr, long segmentDurationUs)
+    {
+        var id = NewCapCutGuid();
+        // Cap the animation to the segment length so short segments still play sensibly.
+        long animUs = segmentDurationUs > 0 ? Math.Min(SlideInDefaultUs, segmentDurationUs) : SlideInDefaultUs;
+        var entry = new JsonObject
+        {
+            ["id"] = SlideInResourceId,
+            ["type"] = "in",
+            ["start"] = 0L,
+            ["duration"] = animUs,
+            ["path"] = "",
+            ["platform"] = "all",
+            ["resource_id"] = SlideInResourceId,
+            ["third_resource_id"] = "0",
+            ["source_platform"] = 1,
+            ["name"] = SlideInName,
+            ["category_id"] = SlideInCategoryId,
+            ["category_name"] = SlideInCategoryName,
+            ["panel"] = "",
+            ["material_type"] = "sticker",
+            ["anim_adjust_params"] = null,
+            ["request_id"] = "",
+        };
+        var mat = new JsonObject
+        {
+            ["id"] = id,
+            ["type"] = "sticker_animation",
+            ["animations"] = new JsonArray(entry),
+            ["multi_language_current"] = "none",
+            ["videoempty_origin"] = OriginMarker,
+        };
+        arr.Add(mat);
+        return id;
+    }
+
+    // ---------- Re-export cleanup ----------
+
+    /// <summary>Removes every segment whose <c>group_id</c> equals <see cref="OriginMarker"/>
+    /// and every material whose <c>videoempty_origin</c> equals <see cref="OriginMarker"/>.
+    /// Returns the number of segments removed.</summary>
+    private static int RemovePriorVideoEmptyContent(
+        JsonArray tracks, JsonArray texts, JsonArray shapes, JsonArray materialAnimations)
+    {
+        int segmentsRemoved = 0;
+
+        foreach (var trackNode in tracks)
+        {
+            if (trackNode is not JsonObject track) continue;
+            if (track["segments"] is not JsonArray segs) continue;
+
+            for (int i = segs.Count - 1; i >= 0; i--)
+            {
+                if (segs[i] is JsonObject s &&
+                    s["group_id"]?.GetValue<string>() == OriginMarker)
+                {
+                    segs.RemoveAt(i);
+                    segmentsRemoved++;
+                }
+            }
+        }
+
+        RemoveTaggedMaterials(texts);
+        RemoveTaggedMaterials(shapes);
+        RemoveTaggedMaterials(materialAnimations);
+
+        return segmentsRemoved;
+    }
+
+    private static void RemoveTaggedMaterials(JsonArray arr)
+    {
+        for (int i = arr.Count - 1; i >= 0; i--)
+        {
+            if (arr[i] is JsonObject m &&
+                m["videoempty_origin"]?.GetValue<string>() == OriginMarker)
+            {
+                arr.RemoveAt(i);
+            }
+        }
+    }
+
     // ---------- Segment builder ----------
 
-    private static JsonObject BuildSegment(string materialId, long startUs, long durationUs, double tx, double ty, int renderIndex)
+    private static JsonObject BuildSegment(string materialId, long startUs, long durationUs, double tx, double ty, int renderIndex, string? animationId = null)
     {
+        var extraRefs = new JsonArray();
+        if (!string.IsNullOrEmpty(animationId))
+            extraRefs.Add(JsonValue.Create(animationId));
+
         return new JsonObject
         {
             ["id"] = NewCapCutGuid(),
@@ -477,14 +603,14 @@ public static class CapCutProjectExporter
             },
             ["uniform_scale"] = new JsonObject { ["on"] = true, ["value"] = 1.0 },
             ["material_id"] = materialId,
-            ["extra_material_refs"] = new JsonArray(),
+            ["extra_material_refs"] = extraRefs,
             ["render_index"] = renderIndex,
             ["keyframe_refs"] = new JsonArray(),
             ["enable_lut"] = false,
             ["enable_adjust"] = false,
             ["enable_hsl"] = false,
             ["visible"] = true,
-            ["group_id"] = "",
+            ["group_id"] = OriginMarker,
             ["enable_color_curves"] = true,
             ["enable_hsl_curves"] = true,
             ["track_render_index"] = 1,
@@ -528,6 +654,20 @@ public static class CapCutProjectExporter
         var arr = new JsonArray();
         obj[key] = arr;
         return arr;
+    }
+
+    private static string MakeUniquePath(string desired)
+    {
+        if (!File.Exists(desired)) return desired;
+        var dir = Path.GetDirectoryName(desired)!;
+        var name = Path.GetFileNameWithoutExtension(desired);
+        var ext = Path.GetExtension(desired);
+        for (int i = 1; i < 1000; i++)
+        {
+            var candidate = Path.Combine(dir, $"{name} ({i}){ext}");
+            if (!File.Exists(candidate)) return candidate;
+        }
+        return Path.Combine(dir, $"{name}-{Guid.NewGuid():n}{ext}");
     }
 
     private static JsonObject FindOrCreateTrack(JsonArray tracks, string type)
