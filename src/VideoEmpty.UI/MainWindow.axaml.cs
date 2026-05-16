@@ -2036,7 +2036,7 @@ public partial class MainWindow : Window
     {
         if (EditorRoot.IsVisible &&
             e.Key == Key.Enter &&
-            e.KeyModifiers.HasFlag(KeyModifiers.Control))
+            e.KeyModifiers == KeyModifiers.Control)
         {
             e.Handled = true;
             await TogglePlaybackFromTextEntryAsync();
@@ -2044,9 +2044,11 @@ public partial class MainWindow : Window
         }
 
         // Frequent timeline shortcut: jump back 10s without reaching for mouse.
+        // Require Ctrl alone (no Shift/Alt) so Ctrl+Shift+Left text selection in textboxes
+        // keeps working as expected.
         if (EditorRoot.IsVisible &&
             e.Key == Key.Left &&
-            e.KeyModifiers.HasFlag(KeyModifiers.Control))
+            e.KeyModifiers == KeyModifiers.Control)
         {
             e.Handled = true;
             SeekRelative(-10000);
