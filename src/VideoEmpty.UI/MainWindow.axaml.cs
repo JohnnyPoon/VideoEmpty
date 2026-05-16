@@ -8,6 +8,7 @@ using System.Linq;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
+using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Input;
 using Avalonia.Interactivity;
@@ -94,6 +95,7 @@ public partial class MainWindow : Window
         OpenVideoButton.Click += OnOpenVideo;
         ExportButton.Click += OnExport;
         ExportSubtitlesButton.Click += OnExportSubtitles;
+        ExportCapCutButton.Click += OnExportCapCut;
         TogglePanelsButton.Click += OnTogglePanels;
         CompactModeButton.Click += OnToggleCompactMode;
         CollapseLeftButton.Click += OnCollapseLeft;
@@ -1793,6 +1795,104 @@ public partial class MainWindow : Window
             Log.Error("UI", "Subtitle export failed", ex);
             ExportStatus.Text = $"Export failed: {ex.Message}";
         }
+    }
+
+    private async void OnExportCapCut(object? sender, RoutedEventArgs e)
+    {
+        if (_project.Instances.Count == 0)
+        {
+            VideoInfoLabel.Text = "Add at least one template instance first.";
+            return;
+        }
+
+        var defaultFolder = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            "CapCut", "User Data", "Projects", "com.lveditor.draft");
+
+        IStorageFolder? startFolder = null;
+        try
+        {
+            if (Directory.Exists(defaultFolder))
+                startFolder = await StorageProvider.TryGetFolderFromPathAsync(defaultFolder);
+        }
+        catch { /* best-effort */ }
+
+        var picked = await StorageProvider.OpenFolderPickerAsync(new FolderPickerOpenOptions
+        {
+            Title = "Pick the CapCut project folder to extend",
+            AllowMultiple = false,
+            SuggestedStartLocation = startFolder,
+        });
+        var folder = picked.Count > 0 ? picked[0].TryGetLocalPath() : null;
+        if (string.IsNullOrEmpty(folder)) return;
+
+        if (!File.Exists(Path.Combine(folder!, "draft_content.json")))
+        {
+            ExportStatus.Text = "Selected folder is not a CapCut project (no draft_content.json).";
+            return;
+        }
+
+        // Mode: clone (safe, default) or edit-in-place (creates .bak)
+        var mode = await PromptChoice(
+            "Export to CapCut",
+            $"Add {_project.Instances.Count} template instance(s) to this CapCut project?\n\n" +
+            "• Clone project (recommended): copies the folder and edits the copy.\n" +
+            "• Edit in place: writes a .bak then modifies draft_content.json.\n\n" +
+            "Note: Template animations are not translated in this version.",
+            new[] { "Clone project", "Edit in place", "Cancel" });
+        if (mode is null || mode == "Cancel") return;
+
+        var options = new CapCutExportOptions(
+            ProjectFolder: folder!,
+            Mode: mode == "Edit in place" ? CapCutExportMode.EditInPlace : CapCutExportMode.CloneProject);
+
+        try
+        {
+            ExportStatus.Text = "Exporting to CapCut…";
+            var result = await Task.Run(() => _api.ExportToCapCut(_project, options));
+            ExportStatus.Text =
+                $"CapCut export done → {Path.GetFileName(result.ProjectFolder)} " +
+                $"({result.TextMaterialsAdded} text, {result.ShapeMaterialsAdded} shape, {result.SegmentsAdded} segments)";
+            try { System.Diagnostics.Process.Start("explorer.exe", $"\"{result.ProjectFolder}\""); } catch { }
+        }
+        catch (Exception ex)
+        {
+            Log.Error("UI", "CapCut export failed", ex);
+            ExportStatus.Text = $"CapCut export failed: {ex.Message}";
+        }
+    }
+
+    private async Task<string?> PromptChoice(string title, string prompt, IReadOnlyList<string> choices)
+    {
+        var tcs = new TaskCompletionSource<string?>();
+        var dialog = new Window
+        {
+            Title = title,
+            Width = 460,
+            SizeToContent = SizeToContent.Height,
+            WindowStartupLocation = WindowStartupLocation.CenterOwner,
+            CanResize = false,
+        };
+        var panel = new StackPanel { Margin = new Thickness(16), Spacing = 12 };
+        panel.Children.Add(new TextBlock { Text = prompt, TextWrapping = Avalonia.Media.TextWrapping.Wrap });
+        var buttonRow = new StackPanel
+        {
+            Orientation = Avalonia.Layout.Orientation.Horizontal,
+            Spacing = 8,
+            HorizontalAlignment = Avalonia.Layout.HorizontalAlignment.Right,
+        };
+        foreach (var c in choices)
+        {
+            var btn = new Button { Content = c };
+            var captured = c;
+            btn.Click += (_, _) => { tcs.TrySetResult(captured); dialog.Close(); };
+            buttonRow.Children.Add(btn);
+        }
+        panel.Children.Add(buttonRow);
+        dialog.Content = panel;
+        dialog.Closed += (_, _) => tcs.TrySetResult(null);
+        await dialog.ShowDialog(this);
+        return await tcs.Task;
     }
 
     private async Task<(bool cancelled, List<string> selected)> PromptMultiSelection(string title, string prompt, List<string> options)

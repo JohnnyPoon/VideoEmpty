@@ -15,6 +15,7 @@ public sealed class VideoEmptyApi : IVideoEmptyApi
     private readonly IFramePreview _framePreview;
     private readonly IVideoExporter _exporter;
     private readonly IDependencyManager _deps;
+    private readonly ICapCutExporter? _capCutExporter;
 
     public VideoEmptyApi(
         ITemplateRenderer renderer,
@@ -22,7 +23,8 @@ public sealed class VideoEmptyApi : IVideoEmptyApi
         IFramePreview framePreview,
         IVideoExporter exporter,
         IDependencyManager deps,
-        Func<byte[], Project, int, byte[]>? compositor = null)
+        Func<byte[], Project, int, byte[]>? compositor = null,
+        ICapCutExporter? capCutExporter = null)
     {
         _renderer = renderer;
         _probe = probe;
@@ -30,6 +32,7 @@ public sealed class VideoEmptyApi : IVideoEmptyApi
         _exporter = exporter;
         _deps = deps;
         _compositor = compositor;
+        _capCutExporter = capCutExporter;
     }
 
     public IDependencyManager Dependencies => _deps;
@@ -181,6 +184,13 @@ public sealed class VideoEmptyApi : IVideoEmptyApi
 
     public string StartExport(Project project, ExportOptions options) =>
         _exporter.Start(project, options);
+
+    public CapCutExportResult ExportToCapCut(Project project, CapCutExportOptions options)
+    {
+        if (_capCutExporter is null)
+            throw new InvalidOperationException("CapCut exporter is not configured for this API instance.");
+        return _capCutExporter.Export(project, options);
+    }
 
     public async Task ExportSubtitlesAsync(Project project, ExportSubtitlesOptions options, CancellationToken ct = default)
     {

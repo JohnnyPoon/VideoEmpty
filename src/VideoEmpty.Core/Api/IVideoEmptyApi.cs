@@ -103,6 +103,8 @@ public interface IVideoEmptyApi
     // Export
     string StartExport(Project project, ExportOptions options);
     Task ExportSubtitlesAsync(Project project, ExportSubtitlesOptions options, CancellationToken ct = default);
+    /// <summary>Append our template instances into an existing CapCut PC project folder.</summary>
+    CapCutExportResult ExportToCapCut(Project project, CapCutExportOptions options);
     JobStatus GetJobStatus(string jobId);
     void CancelJob(string jobId);
 

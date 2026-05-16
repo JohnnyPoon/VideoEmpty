@@ -40,3 +40,12 @@ public interface IVideoExporter
     JobStatus GetStatus(string jobId);
     void Cancel(string jobId);
 }
+
+/// <summary>
+/// Appends template instances into an existing CapCut PC project on disk.
+/// Implementation lives in VideoEmpty.Rendering to keep Core dependency-free.
+/// </summary>
+public interface ICapCutExporter
+{
+    CapCutExportResult Export(Project project, CapCutExportOptions options);
+}

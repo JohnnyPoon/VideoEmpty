@@ -1,5 +1,6 @@
 using VideoEmpty.Core.Api;
 using VideoEmpty.Rendering.Export;
+using VideoEmpty.Rendering.Export.CapCut;
 using VideoEmpty.Rendering.FFmpeg;
 using VideoEmpty.Rendering.Skia;
 
@@ -20,7 +21,8 @@ public static class VideoEmptyServices
         var preview = new FFmpegFramePreview(new LazyFFmpegBinaries(Bin));
         var exporter = new FFmpegVideoExporter(new LazyFFmpegBinaries(Bin), renderer);
         var compositor = new PreviewCompositor(renderer);
-        return new VideoEmptyApi(renderer, probe, preview, exporter, deps, compositor.Compose);
+        var capCut = new CapCutExporter();
+        return new VideoEmptyApi(renderer, probe, preview, exporter, deps, compositor.Compose, capCut);
     }
 }
 
