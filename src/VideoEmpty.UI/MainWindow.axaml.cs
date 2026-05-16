@@ -6,6 +6,7 @@ using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Text.Json;
+using System.Threading;
 using System.Threading.Tasks;
 using Avalonia.Controls;
 using Avalonia.Input;
@@ -38,7 +39,19 @@ public partial class MainWindow : Window
     private DispatcherTimer? _playTimer;
     private bool _isApplyingProject;
     private (double x, double y)? _previewHoverNormalized;
+    private int _previewRenderBusy;
+    private int _previewRenderPending;
+    private int _previewRenderRequestedTimeMs;
+    private readonly Dictionary<int, byte[]> _playbackFrameCache = new();
+    private readonly Queue<int> _playbackFrameCacheOrder = new();
     private bool _dependenciesMissing;
+    private const int PlaybackPreviewQuantizeMs = 100; // 10fps preview target while playing
+    private const int PlaybackFrameCacheMax = 120;
+    private const double PlaybackStreamFps = 15.0;
+    private const int PlaybackStreamMaxWidth = 1280;
+    private CancellationTokenSource? _playbackStreamCts;
+    private Task? _playbackStreamTask;
+    private bool _isSliderInternalUpdate;
 
     private bool _compactMode;
     private bool _showLeftPanel = true;
@@ -57,6 +70,7 @@ public partial class MainWindow : Window
     public MainWindow()
     {
         InitializeComponent();
+        AddHandler(KeyDownEvent, OnGlobalKeyDown, RoutingStrategies.Tunnel);
 
         _project = _api.CreateProject("Untitled");
         DataContext = this;
@@ -108,7 +122,18 @@ public partial class MainWindow : Window
             if (e.Property == Slider.ValueProperty)
             {
                 _currentTimeMs = (int)TimeSlider.Value;
-                _ = RefreshPreviewAsync();
+                UpdatePlaybackTimeLabels(_currentTimeMs);
+                if (_isSliderInternalUpdate) return;
+                // User seek (or any non-internal change) while streaming: restart the stream
+                // at the new position so playback reflects the new playhead.
+                if (_playbackStreamTask is not null)
+                {
+                    _ = RestartPlaybackStreamAsync(_currentTimeMs);
+                }
+                else
+                {
+                    _ = RefreshPreviewAsync();
+                }
             }
         };
 
@@ -117,7 +142,7 @@ public partial class MainWindow : Window
             if (TemplatesList.SelectedItem is Template t)
             {
                 _armedTemplateId = t.Id;
-                ArmedLabel.Text = $"Armed: {t.Name}";
+                ArmedLabel.Text = $"Armed: {t.Name} (click to add, Shift+click to retime latest)";
             }
             else
             {
@@ -163,6 +188,7 @@ public partial class MainWindow : Window
             _projectPath = path;
             _currentTimeMs = 0;
             _previewHoverNormalized = null;
+            ClearPlaybackFrameCache();
             TimeSlider.Value = 0;
             TimeSlider.Maximum = Math.Max(1, _project.VideoDurationMs);
             VideoInfoLabel.Text = string.IsNullOrWhiteSpace(_project.VideoPath)
@@ -312,30 +338,134 @@ public partial class MainWindow : Window
     private void TogglePlay()
     {
         if (_project.VideoDurationMs <= 0) return;
-        if (_playTimer is { IsEnabled: true })
+        if (_playbackStreamTask is not null)
         {
-            _playTimer.Stop();
+            StopPlaybackStream();
             PlayPauseButton.Content = "▶ Play";
             return;
         }
-        _playTimer ??= new DispatcherTimer();
-        _playTimer.Interval = TimeSpan.FromMilliseconds(FrameDurationMs());
-        _playTimer.Tick -= OnPlayTick;
-        _playTimer.Tick += OnPlayTick;
-        _playTimer.Start();
+        StartPlaybackStream(_currentTimeMs);
         PlayPauseButton.Content = "⏸ Pause";
     }
 
-    private void OnPlayTick(object? sender, EventArgs e)
+    private void StartPlaybackStream(int startMs)
     {
-        var next = _currentTimeMs + FrameDurationMs();
-        if (next >= _project.VideoDurationMs)
-        {
-            if (LoopCheck.IsChecked == true) next = 0;
-            else { _playTimer?.Stop(); PlayPauseButton.Content = "▶ Play"; next = _project.VideoDurationMs; }
-        }
-        TimeSlider.Value = next;
+        StopPlaybackStream();
+        ClearPlaybackFrameCache();
+        var cts = new CancellationTokenSource();
+        _playbackStreamCts = cts;
+        _playbackStreamTask = Task.Run(() => RunPlaybackStreamAsync(startMs, cts.Token));
     }
+
+    private void StopPlaybackStream()
+    {
+        var cts = _playbackStreamCts;
+        _playbackStreamCts = null;
+        _playbackStreamTask = null;
+        try { cts?.Cancel(); } catch { /* ignore */ }
+        try { cts?.Dispose(); } catch { /* ignore */ }
+    }
+
+    private async Task RestartPlaybackStreamAsync(int startMs)
+    {
+        if (_playbackStreamTask is null) return;
+        var old = _playbackStreamTask;
+        var oldCts = _playbackStreamCts;
+        _playbackStreamCts = null;
+        _playbackStreamTask = null;
+        try { oldCts?.Cancel(); } catch { /* ignore */ }
+        try { if (old is not null) await old.ConfigureAwait(true); } catch { /* ignore */ }
+        try { oldCts?.Dispose(); } catch { /* ignore */ }
+        if (PlayPauseButton.Content as string == "⏸ Pause")
+            StartPlaybackStream(startMs);
+    }
+
+    private async Task RunPlaybackStreamAsync(int startMs, CancellationToken ct)
+    {
+        try
+        {
+            var fps = PlaybackStreamFps;
+            var frameMs = 1000.0 / fps;
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+            int idx = 0;
+            await foreach (var frame in _api.StreamPreviewFramesAsync(
+                _project, startMs, fps, PlaybackStreamMaxWidth, ct).ConfigureAwait(false))
+            {
+                if (ct.IsCancellationRequested) break;
+                if (frame.TimeMs >= _project.VideoDurationMs)
+                {
+                    await Dispatcher.UIThread.InvokeAsync(() =>
+                    {
+                        if (LoopCheck.IsChecked == true)
+                        {
+                            _ = RestartPlaybackStreamAsync(0);
+                        }
+                        else
+                        {
+                            StopPlaybackStream();
+                            PlayPauseButton.Content = "▶ Play";
+                            SetSliderInternal(_project.VideoDurationMs);
+                        }
+                    });
+                    break;
+                }
+
+                // Pace to real wall-clock: each frame target is idx * frameMs after start.
+                var target = (long)(idx * frameMs);
+                var delay = target - sw.ElapsedMilliseconds;
+                if (delay > 1)
+                {
+                    try { await Task.Delay((int)delay, ct).ConfigureAwait(false); }
+                    catch (OperationCanceledException) { break; }
+                }
+                else if (delay < -250 && idx > 0)
+                {
+                    // Falling behind by >250ms: drop this frame to catch up.
+                    idx++;
+                    continue;
+                }
+
+                var jpeg = frame.Jpeg;
+                var timeMs = frame.TimeMs;
+                await Dispatcher.UIThread.InvokeAsync(() =>
+                {
+                    try
+                    {
+                        using var ms = new MemoryStream(jpeg);
+                        PreviewImage.Source = new Bitmap(ms);
+                    }
+                    catch { /* ignore decode failures */ }
+                    _currentTimeMs = timeMs;
+                    SetSliderInternal(timeMs);
+                    UpdatePlaybackTimeLabels(timeMs);
+                    RenderPlacementOverlay();
+                });
+                idx++;
+            }
+        }
+        catch (OperationCanceledException) { /* expected */ }
+        catch (Exception ex)
+        {
+            Log.Error("UI", "Playback stream failed", ex);
+            await Dispatcher.UIThread.InvokeAsync(() =>
+            {
+                VideoInfoLabel.Text = $"Playback error: {ex.Message}";
+                StopPlaybackStream();
+                PlayPauseButton.Content = "▶ Play";
+            });
+        }
+    }
+
+    private void SetSliderInternal(int valueMs)
+    {
+        _isSliderInternalUpdate = true;
+        try { TimeSlider.Value = Math.Clamp(valueMs, 0, (int)TimeSlider.Maximum); }
+        finally { _isSliderInternalUpdate = false; }
+    }
+
+    private bool IsPlaybackActive() => _playbackStreamTask is not null;
+
+    private void OnPlayTick(object? sender, EventArgs e) { /* deprecated; streaming path drives playback */ }
 
     private void SeekRelative(int deltaMs)
     {
@@ -529,6 +659,7 @@ public partial class MainWindow : Window
         try
         {
             _project = await _api.SetVideoAsync(_project, path);
+            ClearPlaybackFrameCache();
             TimeSlider.Maximum = Math.Max(1, _project.VideoDurationMs);
             TimeSlider.Value = 0;
             VideoInfoLabel.Text = $"{Path.GetFileName(path)} • {_project.VideoResolution.Width}x{_project.VideoResolution.Height} @ {_project.VideoFps:0.##} fps • {_project.VideoDurationMs / 1000.0:0.0}s";
@@ -550,20 +681,81 @@ public partial class MainWindow : Window
     private async Task RefreshPreviewAsync()
     {
         if (string.IsNullOrEmpty(_project.VideoPath)) return;
+        Volatile.Write(ref _previewRenderRequestedTimeMs, GetPreviewRequestTimeMs(_currentTimeMs));
+        if (Interlocked.Exchange(ref _previewRenderBusy, 1) == 1)
+        {
+            Volatile.Write(ref _previewRenderPending, 1);
+            return;
+        }
+
         try
         {
-            var bytes = await _api.RenderFrameAsync(_project, _currentTimeMs);
-            using var ms = new MemoryStream(bytes);
-            PreviewImage.Source = new Bitmap(ms);
-            TimeLabel.Text = $"{_currentTimeMs} ms";
-            PlaybackTimeLabel.Text = $"{FormatTime(_currentTimeMs)} / {FormatTime(_project.VideoDurationMs)}";
-            RenderPlacementOverlay();
+            while (true)
+            {
+                Volatile.Write(ref _previewRenderPending, 0);
+                var requestTimeMs = Volatile.Read(ref _previewRenderRequestedTimeMs);
+                byte[] bytes;
+                if (!TryGetPlaybackCachedFrame(requestTimeMs, out var cached))
+                {
+                    bytes = await _api.RenderFrameAsync(_project, requestTimeMs);
+                    if (IsPlaybackActive())
+                        AddPlaybackCachedFrame(requestTimeMs, bytes);
+                }
+                else
+                {
+                    bytes = cached;
+                }
+                using var ms = new MemoryStream(bytes);
+                PreviewImage.Source = new Bitmap(ms);
+                RenderPlacementOverlay();
+                if (Volatile.Read(ref _previewRenderPending) == 0)
+                    break;
+            }
         }
         catch (Exception ex)
         {
             Log.Error("UI", "RefreshPreview failed", ex);
             VideoInfoLabel.Text = $"Preview error: {ex.Message}";
         }
+        finally
+        {
+            Volatile.Write(ref _previewRenderBusy, 0);
+            if (Volatile.Read(ref _previewRenderPending) == 1)
+                _ = RefreshPreviewAsync();
+        }
+    }
+
+    private int GetPreviewRequestTimeMs(int timeMs)
+    {
+        if (!IsPlaybackActive()) return timeMs;
+        return Math.Max(0, (timeMs / PlaybackPreviewQuantizeMs) * PlaybackPreviewQuantizeMs);
+    }
+
+    private bool TryGetPlaybackCachedFrame(int timeMs, out byte[] bytes) =>
+        _playbackFrameCache.TryGetValue(timeMs, out bytes!);
+
+    private void AddPlaybackCachedFrame(int timeMs, byte[] bytes)
+    {
+        if (_playbackFrameCache.ContainsKey(timeMs)) return;
+        _playbackFrameCache[timeMs] = bytes;
+        _playbackFrameCacheOrder.Enqueue(timeMs);
+        while (_playbackFrameCacheOrder.Count > PlaybackFrameCacheMax)
+        {
+            var old = _playbackFrameCacheOrder.Dequeue();
+            _playbackFrameCache.Remove(old);
+        }
+    }
+
+    private void ClearPlaybackFrameCache()
+    {
+        _playbackFrameCache.Clear();
+        _playbackFrameCacheOrder.Clear();
+    }
+
+    private void UpdatePlaybackTimeLabels(int timeMs)
+    {
+        TimeLabel.Text = $"{timeMs} ms";
+        PlaybackTimeLabel.Text = $"{FormatTime(timeMs)} / {FormatTime(_project.VideoDurationMs)}";
     }
 
     private (double x, double y) GetNormalizedPreviewPoint(Avalonia.Point pos)
@@ -687,11 +879,17 @@ public partial class MainWindow : Window
     private async void OnPreviewClicked(object? sender, PointerPressedEventArgs e)
     {
         if (_armedTemplateId is null || PreviewImage.Source is null) return;
+        var keyModifiers = e.KeyModifiers;
         var (cx, cy) = GetNormalizedPreviewPoint(e.GetPosition(PreviewImage));
 
-        if (_playTimer is { IsEnabled: true }) TogglePlay();
+        if (IsPlaybackActive()) TogglePlay();
 
         var template = _api.GetTemplate(_project, _armedTemplateId);
+        if (keyModifiers.HasFlag(KeyModifiers.Shift))
+        {
+            await RetimeLatestInstanceOfArmedTemplateAsync(template);
+            return;
+        }
         var placement = ResolveClickPlacement(template, cx, cy);
         var values = template.Elements.OfType<TextElement>().ToDictionary(t => t.Id, t => t.DefaultText ?? "");
         var inst = _api.AddInstance(_project, new AddInstanceRequest(template.Id, placement.centerX, placement.centerY, _currentTimeMs, null, values, placement.animationOverride));
@@ -707,6 +905,29 @@ public partial class MainWindow : Window
         }
         await RefreshPreviewAsync();
         await AutoSaveAsync("add-instance");
+    }
+
+    private async Task RetimeLatestInstanceOfArmedTemplateAsync(Template template)
+    {
+        var latest = _project.Instances
+            .Where(i => i.TemplateId == template.Id)
+            .OrderByDescending(i => i.StartMs)
+            .ThenByDescending(i => i.Id)
+            .FirstOrDefault();
+        if (latest is null)
+        {
+            ExportStatus.Text = $"No existing '{template.Name}' instance to retime.";
+            return;
+        }
+
+        _api.UpdateInstance(_project, new UpdateInstanceRequest(
+            latest.Id,
+            StartMs: _currentTimeMs));
+        RefreshInstances(latest.Id);
+        InstancesList.SelectedItem = Instances.FirstOrDefault(item => item.Instance.Id == latest.Id);
+        await RefreshPreviewAsync();
+        await AutoSaveAsync("retime-instance");
+        ExportStatus.Text = $"Retimed latest '{template.Name}' to {_currentTimeMs} ms.";
     }
 
     private async void OnDeleteInstance(object? sender, RoutedEventArgs e)
@@ -1806,12 +2027,39 @@ public partial class MainWindow : Window
         nextBox.SelectAll();
     }
 
+    private async Task TogglePlaybackFromTextEntryAsync()
+    {
+        await ApplyInstanceFromEditorAsync("toggle-playback");
+        TogglePlay();
+    }
+
+    private async void OnGlobalKeyDown(object? sender, KeyEventArgs e)
+    {
+        if (EditorRoot.IsVisible &&
+            e.Key == Key.Enter &&
+            e.KeyModifiers.HasFlag(KeyModifiers.Control))
+        {
+            e.Handled = true;
+            await TogglePlaybackFromTextEntryAsync();
+            return;
+        }
+
+        // Frequent timeline shortcut: jump back 10s without reaching for mouse.
+        if (EditorRoot.IsVisible &&
+            e.Key == Key.Left &&
+            e.KeyModifiers.HasFlag(KeyModifiers.Control))
+        {
+            e.Handled = true;
+            SeekRelative(-10000);
+        }
+    }
+
     private void OnCompactTemplateButtonClicked(object? sender, RoutedEventArgs e)
     {
         if (sender is not Button btn || btn.Tag is not string templateId) return;
         _armedTemplateId = templateId;
         var template = _api.GetTemplate(_project, templateId);
-        ArmedLabel.Text = $"Armed: {template.Name} (click video to add)";
+        ArmedLabel.Text = $"Armed: {template.Name} (click to add, Shift+click to retime latest)";
         RenderPlacementOverlay();
     }
 

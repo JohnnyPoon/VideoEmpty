@@ -41,7 +41,9 @@ public sealed class PreviewCompositor
             }
         }
         using var img = SKImage.FromBitmap(dst);
-        using var encoded = img.Encode(SKEncodedImageFormat.Png, 90);
+        // JPEG is dramatically faster to encode than PNG and ample quality for on-screen preview.
+        // (Export path does not use this compositor — see FFmpegVideoExporter.)
+        using var encoded = img.Encode(SKEncodedImageFormat.Jpeg, 85);
         return encoded.ToArray();
     }
 

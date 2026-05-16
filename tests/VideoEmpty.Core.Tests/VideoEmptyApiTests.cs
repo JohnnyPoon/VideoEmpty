@@ -59,7 +59,11 @@ public class VideoEmptyApiTests
     private sealed class FakeProbe : IVideoProbe
     { public Task<VideoInfo> ProbeAsync(string p, CancellationToken ct=default) => Task.FromResult(new VideoInfo(1920,1080,30,10000)); }
     private sealed class FakePreview : IFramePreview
-    { public Task<byte[]> ExtractFrameAsync(string p, int t, CancellationToken ct=default) => Task.FromResult(Array.Empty<byte>()); }
+    { 
+        public Task<byte[]> ExtractFrameAsync(string p, int t, CancellationToken ct=default) => Task.FromResult(Array.Empty<byte>());
+        public async IAsyncEnumerable<FrameStreamItem> StreamFramesAsync(string p, int s, double f, int w, [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken ct=default)
+        { await Task.CompletedTask; yield break; }
+    }
     private sealed class FakeExporter : IVideoExporter
     {
         public string Start(Project p, ExportOptions o) => "job1";

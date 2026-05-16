@@ -89,6 +89,15 @@ public interface IVideoEmptyApi
     Task<byte[]> RenderFrameAsync(Project project, int timeMs, CancellationToken ct = default);
     byte[] RenderTemplatePreview(Template template, IReadOnlyDictionary<string, string>? textValues = null);
 
+    /// <summary>
+    /// Streams composed preview frames (overlays drawn) starting at <paramref name="startMs"/>
+    /// at the requested <paramref name="fps"/>. The producer pushes frames as fast as they decode;
+    /// the consumer is responsible for pacing/discarding to match wall-clock playback.
+    /// Each yielded frame is a JPEG byte array tagged with its logical playback timestamp.
+    /// </summary>
+    IAsyncEnumerable<FrameStreamItem> StreamPreviewFramesAsync(
+        Project project, int startMs, double fps, int maxWidth, CancellationToken ct = default);
+
     // Export
     string StartExport(Project project, ExportOptions options);
     Task ExportSubtitlesAsync(Project project, ExportSubtitlesOptions options, CancellationToken ct = default);

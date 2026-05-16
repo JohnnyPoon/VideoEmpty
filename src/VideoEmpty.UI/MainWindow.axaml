@@ -316,7 +316,7 @@
                     <StackPanel DockPanel.Dock="Bottom" Spacing="4" Margin="0,4,0,0">
                         <Slider x:Name="TimeSlider" Minimum="0" Maximum="1" Value="0"/>
                         <StackPanel Orientation="Horizontal" Spacing="6" HorizontalAlignment="Center">
-                            <Button x:Name="JumpBack10sButton"  Content="«10s" ToolTip.Tip="Back 10 seconds"/>
+                            <Button x:Name="JumpBack10sButton"  Content="«10s" ToolTip.Tip="Back 10 seconds (Ctrl+Left)"/>
                             <Button x:Name="JumpBack1sButton"   Content="«1s"  ToolTip.Tip="Back 1 second"/>
                             <Button x:Name="StepBackButton"     Content="◄|"   ToolTip.Tip="Previous frame"/>
                             <Button x:Name="PlayPauseButton"    Content="▶ Play" MinWidth="80"/>
@@ -459,3 +459,4 @@
         </Border>
     </Grid>
 </Window>
+

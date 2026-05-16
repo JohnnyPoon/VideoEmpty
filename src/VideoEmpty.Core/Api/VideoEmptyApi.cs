@@ -156,6 +156,23 @@ public sealed class VideoEmptyApi : IVideoEmptyApi
         return _compositor is null ? raw : _compositor(raw, project, timeMs);
     }
 
+    public async IAsyncEnumerable<FrameStreamItem> StreamPreviewFramesAsync(
+        Project project, int startMs, double fps, int maxWidth,
+        [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken ct = default)
+    {
+        if (string.IsNullOrEmpty(project.VideoPath))
+            throw new InvalidOperationException("Project has no video.");
+        await foreach (var item in _framePreview
+            .StreamFramesAsync(project.VideoPath!, startMs, fps, maxWidth, ct)
+            .ConfigureAwait(false))
+        {
+            byte[] outBytes = _compositor is null
+                ? item.Jpeg
+                : _compositor(item.Jpeg, project, item.TimeMs);
+            yield return new FrameStreamItem(item.TimeMs, outBytes);
+        }
+    }
+
     /// <summary>Optional overlay compositor; when set, RenderFrameAsync returns frames with overlays drawn.</summary>
     private readonly Func<byte[], Project, int, byte[]>? _compositor;
 
