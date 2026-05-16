@@ -102,9 +102,12 @@ public sealed class FFmpegVideoExporter : IVideoExporter
             try
             {
                 // ---- Decoder: source video → raw BGRA frames at exact target fps/resolution.
+                // -hwaccel auto lets ffmpeg use NVDEC/D3D11/etc when the source codec is supported,
+                // dramatically cutting CPU cost for 1080p/4K H.264/HEVC sources.
                 var decArgs = new List<string>
                 {
                     "-hide_banner", "-loglevel", "error",
+                    "-hwaccel", "auto",
                     "-i", project.VideoPath!,
                     "-vf", $"fps={fps.ToString("0.######", CultureInfo.InvariantCulture)},scale={vw}:{vh}:flags=fast_bilinear,format=bgra",
                     "-f", "rawvideo",
@@ -167,68 +170,135 @@ public sealed class FFmpegVideoExporter : IVideoExporter
                     }
                 });
 
-                // ---- Composite loop: read N frames from decoder, draw overlays, write to encoder.
+                // ---- Composite loop: pipelined producer/consumer.
+                //
+                // Producer thread: read raw BGRA frames from decoder, composite overlays on top,
+                //                  enqueue frame to bounded channel.
+                // Consumer thread: dequeue frame, write to encoder stdin.
+                //
+                // Two reasons this matters vs a serial loop:
+                //   1) Anonymous pipes on Windows have ~64KB buffers, so without pipelining the
+                //      decoder, compositor, and encoder all serialize on each other.
+                //   2) .NET async I/O over anonymous pipes has high per-call overhead. Synchronous
+                //      reads/writes on dedicated background threads are markedly faster and let
+                //      the OS scheduler keep all three ffmpeg/Skia stages busy concurrently.
                 var info = new SKImageInfo(vw, vh, SKColorType.Bgra8888, SKAlphaType.Premul);
-                var buf = new byte[frameBytes];
-                var handle = GCHandle.Alloc(buf, GCHandleType.Pinned);
-                try
+                long totalFrames = Math.Max(1, (long)Math.Round(project.VideoDurationMs / 1000.0 * fps));
+
+                // Bounded queue: at most a few frames in flight to keep memory in check
+                // (one 1080p BGRA frame is ~8.3 MB).
+                var bufferPool = new System.Collections.Concurrent.ConcurrentBag<byte[]>();
+                var queue = new System.Collections.Concurrent.BlockingCollection<byte[]>(boundedCapacity: 4);
+
+                byte[] RentBuffer()
                 {
-                    using var dstBmp = new SKBitmap();
-                    dstBmp.InstallPixels(info, handle.AddrOfPinnedObject(), vw * 4);
+                    return bufferPool.TryTake(out var b) ? b : new byte[frameBytes];
+                }
 
-                    var decStdout = decoder.StandardOutput.BaseStream;
-                    var encStdin = encoder.StandardInput.BaseStream;
-                    long frameIdx = 0;
-                    long totalFrames = Math.Max(1, (long)Math.Round(project.VideoDurationMs / 1000.0 * fps));
+                var decStdoutStream = decoder.StandardOutput.BaseStream;
+                var encStdinStream = encoder.StandardInput.BaseStream;
 
-                    using var skPaint = new SKPaint { IsAntialias = true };
-
-                    while (!job.Cts.IsCancellationRequested)
+                // --- Consumer: drain queue → encoder stdin (synchronous, dedicated thread).
+                var writerTask = Task.Factory.StartNew(() =>
+                {
+                    try
                     {
-                        int read = 0;
-                        while (read < frameBytes)
+                        foreach (var frame in queue.GetConsumingEnumerable(job.Cts.Token))
                         {
-                            int n = await decStdout.ReadAsync(buf.AsMemory(read, frameBytes - read), job.Cts.Token).ConfigureAwait(false);
-                            if (n == 0) break;
-                            read += n;
-                        }
-                        if (read < frameBytes) break; // end of stream
-
-                        int timeMs = (int)Math.Round(frameIdx * 1000.0 / fps);
-                        // dstBmp pixels alias buf -> the current source frame is already there.
-                        // Draw all active overlays on top.
-                        using (var canvas = new SKCanvas(dstBmp))
-                        {
-                            double frameDurMs = 1000.0 / fps;
-                            foreach (var (inst, tpl, obmp) in overlays)
-                            {
-                                // Include one extra frame so the final exit-anim frame is rendered.
-                                if (timeMs < inst.StartMs) continue;
-                                if (timeMs > inst.StartMs + inst.DurationMs + frameDurMs) continue;
-                                var (x, y) = PreviewCompositor.ComputePosition(tpl, inst, timeMs, vw, vh);
-                                canvas.DrawBitmap(obmp, x, y, skPaint);
-                            }
-                        }
-
-                        await encStdin.WriteAsync(buf.AsMemory(0, frameBytes), job.Cts.Token).ConfigureAwait(false);
-
-                        frameIdx++;
-                        // Coarse progress fallback (encoder stderr also drives it).
-                        if ((frameIdx & 0x3F) == 0)
-                        {
-                            var p = Math.Clamp((double)frameIdx / totalFrames, 0.0, 0.99);
-                            if (p > job.Status.Progress) job.Status.Progress = p;
+                            encStdinStream.Write(frame, 0, frameBytes);
+                            bufferPool.Add(frame);
                         }
                     }
-                }
-                finally
+                    catch (OperationCanceledException) { }
+                    catch (Exception ex)
+                    {
+                        VideoEmpty.Core.Diagnostics.Log.Error("ffmpeg-export", "Encoder writer failed", ex);
+                    }
+                    finally
+                    {
+                        try { encStdinStream.Flush(); } catch { }
+                        try { encoder.StandardInput.Close(); } catch { }
+                    }
+                }, job.Cts.Token, TaskCreationOptions.LongRunning, TaskScheduler.Default);
+
+                // --- Producer: dedicated thread doing sync reads + Skia compositing.
+                var producerTask = Task.Factory.StartNew(() =>
                 {
-                    handle.Free();
-                    try { encoder.StandardInput.Close(); } catch { /* ignore */ }
-                }
+                    try
+                    {
+                        long frameIdx = 0;
+                        using var skPaint = new SKPaint { IsAntialias = true };
+                        double frameDurMs = 1000.0 / fps;
+
+                        while (!job.Cts.IsCancellationRequested)
+                        {
+                            var buf = RentBuffer();
+                            int read = 0;
+                            while (read < frameBytes)
+                            {
+                                int n = decStdoutStream.Read(buf, read, frameBytes - read);
+                                if (n == 0) break;
+                                read += n;
+                            }
+                            if (read < frameBytes)
+                            {
+                                bufferPool.Add(buf);
+                                break; // end of stream
+                            }
+
+                            int timeMs = (int)Math.Round(frameIdx * 1000.0 / fps);
+
+                            // Pin the rented buffer for the duration of this composite so the
+                            // SKBitmap aliases its pixels.
+                            var handle = GCHandle.Alloc(buf, GCHandleType.Pinned);
+                            try
+                            {
+                                using var dstBmp = new SKBitmap();
+                                dstBmp.InstallPixels(info, handle.AddrOfPinnedObject(), vw * 4);
+                                using (var canvas = new SKCanvas(dstBmp))
+                                {
+                                    foreach (var (inst, tpl, obmp) in overlays)
+                                    {
+                                        if (timeMs < inst.StartMs) continue;
+                                        if (timeMs > inst.StartMs + inst.DurationMs + frameDurMs) continue;
+                                        var (x, y) = PreviewCompositor.ComputePosition(tpl, inst, timeMs, vw, vh);
+                                        canvas.DrawBitmap(obmp, x, y, skPaint);
+                                    }
+                                }
+                            }
+                            finally
+                            {
+                                handle.Free();
+                            }
+
+                            // Hand off to writer. If the queue is full, this blocks until the
+                            // encoder catches up - that's the natural back-pressure.
+                            queue.Add(buf, job.Cts.Token);
+
+                            frameIdx++;
+                            if ((frameIdx & 0x3F) == 0)
+                            {
+                                var p = Math.Clamp((double)frameIdx / totalFrames, 0.0, 0.99);
+                                if (p > job.Status.Progress) job.Status.Progress = p;
+                            }
+                        }
+                    }
+                    catch (OperationCanceledException) { }
+                    catch (Exception ex)
+                    {
+                        VideoEmpty.Core.Diagnostics.Log.Error("ffmpeg-export", "Composite producer failed", ex);
+                    }
+                    finally
+                    {
+                        queue.CompleteAdding();
+                    }
+                }, job.Cts.Token, TaskCreationOptions.LongRunning, TaskScheduler.Default);
 
                 using var decReg = job.Cts.Token.Register(() => { try { if (!decoder.HasExited) decoder.Kill(true); } catch { } });
                 using var encReg = job.Cts.Token.Register(() => { try { if (!encoder.HasExited) encoder.Kill(true); } catch { } });
+
+                await producerTask.ConfigureAwait(false);
+                await writerTask.ConfigureAwait(false);
 
                 await encoder.WaitForExitAsync(job.Cts.Token).ConfigureAwait(false);
                 await encStderrTask.ConfigureAwait(false);
@@ -305,7 +375,9 @@ public sealed class FFmpegVideoExporter : IVideoExporter
         {
             case "h264_nvenc":
             case "hevc_nvenc":
-                a.Add("-preset"); a.Add(userPreset ?? "p4");
+                // p1 = fastest. Quality at 1080p is still very good for screen-capture content
+                // and is dramatically faster than p4. CQ 23 keeps file size reasonable.
+                a.Add("-preset"); a.Add(userPreset ?? "p1");
                 a.Add("-tune");   a.Add("hq");
                 a.Add("-rc");     a.Add("vbr");
                 a.Add("-cq");     a.Add("23");
@@ -338,37 +410,54 @@ public sealed class FFmpegVideoExporter : IVideoExporter
         {
             if (_hardwareEncoderProbed) return _cachedHardwareEncoder;
             _hardwareEncoderProbed = true;
-            try
-            {
-                var psi = new ProcessStartInfo(_bin.FFmpegPath, "-hide_banner -encoders")
-                {
-                    RedirectStandardOutput = true,
-                    RedirectStandardError = true,
-                    UseShellExecute = false,
-                    CreateNoWindow = true
-                };
-                using var p = Process.Start(psi);
-                if (p is null) return null;
-                var output = p.StandardOutput.ReadToEnd();
-                p.WaitForExit(5000);
 
-                // Prefer NVENC > QSV > AMF (rough perf ordering on consumer hardware).
-                foreach (var candidate in new[] { "h264_nvenc", "h264_qsv", "h264_amf" })
-                {
-                    if (output.Contains(candidate, StringComparison.Ordinal))
-                    {
-                        _cachedHardwareEncoder = candidate;
-                        VideoEmpty.Core.Diagnostics.Log.Info("ffmpeg-export", $"Hardware encoder available: {candidate}");
-                        return candidate;
-                    }
-                }
-                VideoEmpty.Core.Diagnostics.Log.Info("ffmpeg-export", "No hardware H.264 encoder available; using libx264.");
-            }
-            catch (Exception ex)
+            // Prefer NVENC > QSV > AMF. Parsing `-encoders` only proves the encoder is
+            // *compiled in*; the runtime device may still be absent (e.g. no NVIDIA GPU,
+            // no Intel iGPU enabled, AMD driver missing). So actually try to encode one
+            // synthetic frame with each candidate and accept the first that returns 0.
+            foreach (var candidate in new[] { "h264_nvenc", "h264_qsv", "h264_amf" })
             {
-                VideoEmpty.Core.Diagnostics.Log.Error("ffmpeg-export", "Hardware encoder probe failed", ex);
+                if (TryHardwareEncoder(candidate))
+                {
+                    _cachedHardwareEncoder = candidate;
+                    VideoEmpty.Core.Diagnostics.Log.Info("ffmpeg-export", $"Hardware encoder available: {candidate}");
+                    return candidate;
+                }
             }
-            return _cachedHardwareEncoder;
+            VideoEmpty.Core.Diagnostics.Log.Info("ffmpeg-export", "No working hardware H.264 encoder; falling back to libx264.");
+            return null;
+        }
+    }
+
+    private bool TryHardwareEncoder(string codec)
+    {
+        try
+        {
+            var psi = new ProcessStartInfo(_bin.FFmpegPath)
+            {
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+                CreateNoWindow = true,
+            };
+            foreach (var a in new[]
+            {
+                "-hide_banner", "-loglevel", "error",
+                "-f", "lavfi", "-i", "color=size=320x240:rate=30:duration=0.1",
+                "-c:v", codec, "-f", "null", "-"
+            }) psi.ArgumentList.Add(a);
+
+            using var p = Process.Start(psi);
+            if (p is null) return false;
+            // Drain both so the process can exit.
+            _ = p.StandardOutput.ReadToEndAsync();
+            _ = p.StandardError.ReadToEndAsync();
+            if (!p.WaitForExit(8000)) { try { p.Kill(true); } catch { } return false; }
+            return p.ExitCode == 0;
+        }
+        catch
+        {
+            return false;
         }
     }
 
