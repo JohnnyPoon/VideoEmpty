@@ -2043,15 +2043,22 @@ public partial class MainWindow : Window
             return;
         }
 
-        // Frequent timeline shortcut: jump back 10s without reaching for mouse.
-        // Require Ctrl alone (no Shift/Alt) so Ctrl+Shift+Left text selection in textboxes
-        // keeps working as expected.
+        // Frequent timeline shortcuts: jump back/forward 10s without reaching for mouse.
+        // Use Ctrl+Alt so Ctrl+Left / Ctrl+Shift+Left word navigation in textboxes is unaffected.
         if (EditorRoot.IsVisible &&
             e.Key == Key.Left &&
-            e.KeyModifiers == KeyModifiers.Control)
+            e.KeyModifiers == (KeyModifiers.Control | KeyModifiers.Alt))
         {
             e.Handled = true;
             SeekRelative(-10000);
+            return;
+        }
+        if (EditorRoot.IsVisible &&
+            e.Key == Key.Right &&
+            e.KeyModifiers == (KeyModifiers.Control | KeyModifiers.Alt))
+        {
+            e.Handled = true;
+            SeekRelative(+10000);
         }
     }
 

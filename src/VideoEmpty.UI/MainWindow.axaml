@@ -316,13 +316,13 @@
                     <StackPanel DockPanel.Dock="Bottom" Spacing="4" Margin="0,4,0,0">
                         <Slider x:Name="TimeSlider" Minimum="0" Maximum="1" Value="0"/>
                         <StackPanel Orientation="Horizontal" Spacing="6" HorizontalAlignment="Center">
-                            <Button x:Name="JumpBack10sButton"  Content="«10s" ToolTip.Tip="Back 10 seconds (Ctrl+Left)"/>
+                            <Button x:Name="JumpBack10sButton"  Content="«10s" ToolTip.Tip="Back 10 seconds (Ctrl+Alt+Left)"/>
                             <Button x:Name="JumpBack1sButton"   Content="«1s"  ToolTip.Tip="Back 1 second"/>
                             <Button x:Name="StepBackButton"     Content="◄|"   ToolTip.Tip="Previous frame"/>
                             <Button x:Name="PlayPauseButton"    Content="▶ Play" MinWidth="80"/>
                             <Button x:Name="StepForwardButton"  Content="|►"   ToolTip.Tip="Next frame"/>
                             <Button x:Name="JumpForward1sButton" Content="1s»" ToolTip.Tip="Forward 1 second"/>
-                            <Button x:Name="JumpForward10sButton" Content="10s»" ToolTip.Tip="Forward 10 seconds"/>
+                            <Button x:Name="JumpForward10sButton" Content="10s»" ToolTip.Tip="Forward 10 seconds (Ctrl+Alt+Right)"/>
                             <CheckBox x:Name="LoopCheck" Content="Loop" VerticalAlignment="Center" Margin="12,0,0,0"/>
                             <TextBlock x:Name="PlaybackTimeLabel" VerticalAlignment="Center" Margin="12,0,0,0" Text="0:00.000 / 0:00.000"/>
                         </StackPanel>
