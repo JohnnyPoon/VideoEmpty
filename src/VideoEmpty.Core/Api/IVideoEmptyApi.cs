@@ -28,7 +28,9 @@ public sealed record ExportOptions(
     string VideoCodec = "libx264",
     string AudioCodec = "aac",
     int? VideoBitrateKbps = null,
-    int? Crf = 18);
+    int? Crf = 18,
+    bool UseHardwareAcceleration = true,
+    string? Preset = null);
 
 public sealed record ExportSubtitlesOptions(
     string OutputPath,

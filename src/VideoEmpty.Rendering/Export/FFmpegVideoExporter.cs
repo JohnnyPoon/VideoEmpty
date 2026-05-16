@@ -1,7 +1,9 @@
 using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Globalization;
+using System.Runtime.InteropServices;
 using System.Text;
+using SkiaSharp;
 using VideoEmpty.Core.Api;
 using VideoEmpty.Core.Model;
 using VideoEmpty.Rendering.FFmpeg;
@@ -10,21 +12,27 @@ using VideoEmpty.Rendering.Skia;
 namespace VideoEmpty.Rendering.Export;
 
 /// <summary>
-/// Exports the project by pre-rendering every animation frame as a full-resolution
-/// transparent PNG (position baked in via SkiaSharp), then compositing the sequences
-/// onto the source video with FFmpeg.
+/// Streaming exporter:
+///   ffmpeg (decode + scale + cfr) → BGRA pipe → Skia compositor → BGRA pipe → ffmpeg (encode + mux audio).
 ///
-/// Timing strategy: each sequence is pre-padded with transparent frames so that
-/// every image2 input starts at t=0 in the filter graph. This avoids <c>setpts</c>
-/// and <c>-itsoffset</c>, both of which can mis-align overlay frames when the image2
-/// time base differs from the main video time base. <c>-shortest</c> is intentionally
-/// omitted so the source video determines the output duration.
+/// Replaces the previous per-instance pre-rendered PNG sequence + 80-deep
+/// overlay filtergraph approach, which was O(instances × frames) on disk and
+/// stacked one full-frame alpha blend per instance per frame.
+///
+/// Key wins for a 20 min × 80 instance project:
+///   • No temp PNG sequences (millions of files removed).
+///   • Single composite pass per frame instead of N chained overlays.
+///   • Hardware H.264 encoder auto-detected (NVENC / QSV / AMF) with libx264 fallback.
+///   • Fast preset and constant frame-rate pipeline keep encoder fed.
 /// </summary>
 public sealed class FFmpegVideoExporter : IVideoExporter
 {
     private readonly FFmpegBinaries _bin;
     private readonly SkiaTemplateRenderer _renderer;
     private readonly ConcurrentDictionary<string, JobEntry> _jobs = new();
+    private string? _cachedHardwareEncoder;
+    private bool _hardwareEncoderProbed;
+    private readonly object _hwLock = new();
 
     public FFmpegVideoExporter(FFmpegBinaries bin, SkiaTemplateRenderer renderer)
     {
@@ -37,14 +45,12 @@ public sealed class FFmpegVideoExporter : IVideoExporter
         public JobStatus Status { get; } = new();
         public CancellationTokenSource Cts { get; } = new();
         public Task? Task { get; set; }
-        public string? WorkDir { get; set; }
     }
 
     public string Start(Project project, ExportOptions options)
     {
         if (string.IsNullOrEmpty(project.VideoPath))
             throw new InvalidOperationException("Project has no video.");
-
         var job = new JobEntry();
         job.Status.JobId = Guid.NewGuid().ToString("n");
         job.Status.State = JobState.Pending;
@@ -69,10 +75,9 @@ public sealed class FFmpegVideoExporter : IVideoExporter
 
     private async Task RunJob(JobEntry job, Project project, ExportOptions options)
     {
-        var work = Path.Combine(Path.GetTempPath(), "videoempty", job.Status.JobId);
-        Directory.CreateDirectory(work);
-        job.WorkDir = work;
         job.Status.State = JobState.Running;
+        Process? decoder = null;
+        Process? encoder = null;
         try
         {
             _bin.EnsureFFmpeg();
@@ -80,136 +85,172 @@ public sealed class FFmpegVideoExporter : IVideoExporter
             double fps = project.VideoFps > 0 ? project.VideoFps : 30.0;
             int vw = project.VideoResolution.Width > 0 ? project.VideoResolution.Width : 1920;
             int vh = project.VideoResolution.Height > 0 ? project.VideoResolution.Height : 1080;
+            // Many encoders require even dimensions for yuv420p.
+            vw &= ~1; vh &= ~1;
+            int frameBytes = checked(vw * vh * 4);
 
-            // 1. Pre-render every animation frame for each instance.
-            //    Each frame is a full-resolution transparent PNG with the overlay
-            //    pixel-positioned via the same math as the live preview compositor.
-            //    This produces butter-smooth animation without FFmpeg expression evaluation.
-            var seqInfos = new List<(string dir, int frameCount, TemplateInstance inst)>();
-            for (int i = 0; i < project.Instances.Count; i++)
+            // Pre-render each instance's overlay bitmap once (it doesn't change frame-to-frame;
+            // only its position does). Disposed after the loop completes.
+            var overlays = new List<(TemplateInstance Inst, Template Tpl, SKBitmap Bmp)>(project.Instances.Count);
+            foreach (var inst in project.Instances)
             {
-                var inst = project.Instances[i];
-                job.Status.Message = $"Pre-rendering animation {i + 1}/{project.Instances.Count}";
                 var template = project.Templates.FirstOrDefault(t => t.Id == inst.TemplateId)
                     ?? throw new InvalidOperationException($"Template '{inst.TemplateId}' missing.");
+                overlays.Add((inst, template, _renderer.RenderBitmap(template, inst.TextValues)));
+            }
 
-                using var overlayBmp = _renderer.RenderBitmap(template, inst.TextValues);
-                var seqDir = Path.Combine(work, $"seq_{i}");
-                Directory.CreateDirectory(seqDir);
-
-                double frameDurMs = 1000.0 / fps;
-                int frameCount = 0;
-                for (double tMs = inst.StartMs; tMs <= inst.StartMs + inst.DurationMs + frameDurMs; tMs += frameDurMs)
+            try
+            {
+                // ---- Decoder: source video → raw BGRA frames at exact target fps/resolution.
+                var decArgs = new List<string>
                 {
-                    var (x, y) = PreviewCompositor.ComputePosition(template, inst, (int)tMs, vw, vh);
+                    "-hide_banner", "-loglevel", "error",
+                    "-i", project.VideoPath!,
+                    "-vf", $"fps={fps.ToString("0.######", CultureInfo.InvariantCulture)},scale={vw}:{vh}:flags=fast_bilinear,format=bgra",
+                    "-f", "rawvideo",
+                    "-pix_fmt", "bgra",
+                    "-"
+                };
+                decoder = StartFFmpeg(decArgs, captureStdout: true, captureStderr: true, captureStdin: false);
 
-                    // Render a full-resolution transparent canvas with the overlay drawn at
-                    // the computed pixel position for this frame's time.
-                    using var frame = new SkiaSharp.SKBitmap(vw, vh, SkiaSharp.SKColorType.Rgba8888, SkiaSharp.SKAlphaType.Premul);
-                    using (var canvas = new SkiaSharp.SKCanvas(frame))
+                // Drain decoder stderr in the background so its pipe doesn't fill.
+                _ = Task.Run(async () =>
+                {
+                    try { await decoder.StandardError.ReadToEndAsync().ConfigureAwait(false); }
+                    catch { /* ignore */ }
+                });
+
+                // ---- Encoder: raw BGRA from stdin + audio from source → final mp4.
+                var (videoCodec, presetArgs) = ResolveVideoCodec(options);
+                job.Status.Message = $"Encoding ({videoCodec})";
+
+                var encArgs = new List<string>
+                {
+                    "-hide_banner", "-loglevel", "error",
+                    "-y",
+                    // Input 0: raw video from this process via stdin.
+                    "-f", "rawvideo",
+                    "-pix_fmt", "bgra",
+                    "-s", $"{vw}x{vh}",
+                    "-r", fps.ToString("0.######", CultureInfo.InvariantCulture),
+                    "-i", "-",
+                    // Input 1: source video again, used only for audio.
+                    "-i", project.VideoPath!,
+                    "-map", "0:v:0",
+                    "-map", "1:a?",
+                    "-c:v", videoCodec,
+                };
+                encArgs.AddRange(presetArgs);
+                if (options.VideoBitrateKbps is { } br) { encArgs.Add("-b:v"); encArgs.Add($"{br}k"); }
+                else if (options.Crf is { } crf && IsCrfCodec(videoCodec)) { encArgs.Add("-crf"); encArgs.Add(crf.ToString(CultureInfo.InvariantCulture)); }
+                encArgs.Add("-pix_fmt"); encArgs.Add("yuv420p");
+                encArgs.Add("-c:a"); encArgs.Add(options.AudioCodec);
+                encArgs.Add("-shortest");
+                encArgs.Add("-fps_mode"); encArgs.Add("cfr");
+                encArgs.Add("-r"); encArgs.Add(fps.ToString("0.######", CultureInfo.InvariantCulture));
+                encArgs.Add("-progress"); encArgs.Add("pipe:2");
+                encArgs.Add("-nostats");
+                encArgs.Add(options.OutputPath);
+
+                VideoEmpty.Core.Diagnostics.Log.Info("ffmpeg-export", $"encode: {_bin.FFmpegPath} {string.Join(" ", encArgs)}");
+                encoder = StartFFmpeg(encArgs, captureStdout: false, captureStderr: true, captureStdin: true);
+
+                var encStderr = new StringBuilder();
+                var encStderrTask = Task.Run(async () =>
+                {
+                    while (true)
                     {
-                        canvas.Clear(SkiaSharp.SKColors.Transparent);
-                        using var paint = new SkiaSharp.SKPaint { IsAntialias = true };
-                        canvas.DrawBitmap(overlayBmp, x, y, paint);
+                        var line = await encoder.StandardError.ReadLineAsync().ConfigureAwait(false);
+                        if (line is null) break;
+                        encStderr.AppendLine(line);
+                        UpdateProgress(line, project.VideoDurationMs, job.Status);
                     }
-                    using var img = SkiaSharp.SKImage.FromBitmap(frame);
-                    using var encoded = img.Encode(SkiaSharp.SKEncodedImageFormat.Png, 90);
-                    var framePath = Path.Combine(seqDir, $"frame_{frameCount:D6}.png");
-                    await File.WriteAllBytesAsync(framePath, encoded.ToArray(), job.Cts.Token).ConfigureAwait(false);
-                    frameCount++;
-                }
+                });
 
-                seqInfos.Add((seqDir, frameCount, inst));
-            }
-
-            // 2. Pre-pad each sequence with transparent frames so that every image2
-            //    input starts at t=0 in the filter graph.  This eliminates the need
-            //    for setpts or -itsoffset PTS shifting, which can cause frame-sync
-            //    issues when the image2 time base differs from the main video time base.
-            job.Status.Message = "Padding overlay sequences";
-
-            // Shared transparent frame (all-zero alpha) used for padding.
-            var transparentPath = Path.Combine(work, "transparent.png");
-            {
-                using var bmp = new SkiaSharp.SKBitmap(vw, vh, SkiaSharp.SKColorType.Rgba8888, SkiaSharp.SKAlphaType.Premul);
-                using var cvs = new SkiaSharp.SKCanvas(bmp);
-                cvs.Clear(SkiaSharp.SKColors.Transparent);
-                using var img = SkiaSharp.SKImage.FromBitmap(bmp);
-                using var enc = img.Encode(SkiaSharp.SKEncodedImageFormat.Png, 90);
-                await File.WriteAllBytesAsync(transparentPath, enc.ToArray(), job.Cts.Token).ConfigureAwait(false);
-            }
-
-            var paddedSeqInfos = new List<(string dir, int frameCount, TemplateInstance inst)>(seqInfos.Count);
-            foreach (var (seqDir, animFrames, inst) in seqInfos)
-            {
-                int padFrames = (int)Math.Round(inst.StartMs * fps / 1000.0);
-                if (padFrames > 0)
+                // ---- Composite loop: read N frames from decoder, draw overlays, write to encoder.
+                var info = new SKImageInfo(vw, vh, SKColorType.Bgra8888, SKAlphaType.Premul);
+                var buf = new byte[frameBytes];
+                var handle = GCHandle.Alloc(buf, GCHandleType.Pinned);
+                try
                 {
-                    // Rename animation frames to make room at the start of the sequence.
-                    for (int f = animFrames - 1; f >= 0; f--)
+                    using var dstBmp = new SKBitmap();
+                    dstBmp.InstallPixels(info, handle.AddrOfPinnedObject(), vw * 4);
+
+                    var decStdout = decoder.StandardOutput.BaseStream;
+                    var encStdin = encoder.StandardInput.BaseStream;
+                    long frameIdx = 0;
+                    long totalFrames = Math.Max(1, (long)Math.Round(project.VideoDurationMs / 1000.0 * fps));
+
+                    using var skPaint = new SKPaint { IsAntialias = true };
+
+                    while (!job.Cts.IsCancellationRequested)
                     {
-                        var oldPath = Path.Combine(seqDir, $"frame_{f:D6}.png");
-                        var newPath = Path.Combine(seqDir, $"frame_{f + padFrames:D6}.png");
-                        File.Move(oldPath, newPath);
+                        int read = 0;
+                        while (read < frameBytes)
+                        {
+                            int n = await decStdout.ReadAsync(buf.AsMemory(read, frameBytes - read), job.Cts.Token).ConfigureAwait(false);
+                            if (n == 0) break;
+                            read += n;
+                        }
+                        if (read < frameBytes) break; // end of stream
+
+                        int timeMs = (int)Math.Round(frameIdx * 1000.0 / fps);
+                        // dstBmp pixels alias buf -> the current source frame is already there.
+                        // Draw all active overlays on top.
+                        using (var canvas = new SKCanvas(dstBmp))
+                        {
+                            double frameDurMs = 1000.0 / fps;
+                            foreach (var (inst, tpl, obmp) in overlays)
+                            {
+                                // Include one extra frame so the final exit-anim frame is rendered.
+                                if (timeMs < inst.StartMs) continue;
+                                if (timeMs > inst.StartMs + inst.DurationMs + frameDurMs) continue;
+                                var (x, y) = PreviewCompositor.ComputePosition(tpl, inst, timeMs, vw, vh);
+                                canvas.DrawBitmap(obmp, x, y, skPaint);
+                            }
+                        }
+
+                        await encStdin.WriteAsync(buf.AsMemory(0, frameBytes), job.Cts.Token).ConfigureAwait(false);
+
+                        frameIdx++;
+                        // Coarse progress fallback (encoder stderr also drives it).
+                        if ((frameIdx & 0x3F) == 0)
+                        {
+                            var p = Math.Clamp((double)frameIdx / totalFrames, 0.0, 0.99);
+                            if (p > job.Status.Progress) job.Status.Progress = p;
+                        }
                     }
-                    // Fill the vacated slots with the shared transparent frame.
-                    for (int f = 0; f < padFrames; f++)
-                        File.Copy(transparentPath, Path.Combine(seqDir, $"frame_{f:D6}.png"));
                 }
-                paddedSeqInfos.Add((seqDir, padFrames + animFrames, inst));
-            }
-
-            // 3. Build ffmpeg argv using the padded pre-rendered sequences.
-            var args = BuildExportArgsFromSequences(project, options, paddedSeqInfos, fps);
-            VideoEmpty.Core.Diagnostics.Log.Info("ffmpeg-export", $"{_bin.FFmpegPath} {string.Join(" ", args)}");
-            job.Status.Progress = 0.1;
-            job.Status.Message = "Encoding video";
-
-            var psi = new ProcessStartInfo(_bin.FFmpegPath)
-            {
-                RedirectStandardOutput = false,
-                RedirectStandardError = true,
-                UseShellExecute = false,
-                CreateNoWindow = true
-            };
-            foreach (var a in args) psi.ArgumentList.Add(a);
-
-            Process? p;
-            try { p = Process.Start(psi); }
-            catch (Exception ex)
-            {
-                VideoEmpty.Core.Diagnostics.Log.Error("ffmpeg-export", "Failed to start ffmpeg", ex);
-                throw new InvalidOperationException($"Failed to start ffmpeg ('{_bin.FFmpegPath}'): {ex.Message}", ex);
-            }
-            if (p is null) throw new InvalidOperationException("Failed to start ffmpeg.");
-            using var _ = p;
-            var stderr = new StringBuilder();
-            var stderrTask = Task.Run(async () =>
-            {
-                while (true)
+                finally
                 {
-                    var line = await p.StandardError.ReadLineAsync().ConfigureAwait(false);
-                    if (line is null) break;
-                    stderr.AppendLine(line);
-                    UpdateProgress(line, project.VideoDurationMs, job.Status);
+                    handle.Free();
+                    try { encoder.StandardInput.Close(); } catch { /* ignore */ }
                 }
-            });
-            using var reg = job.Cts.Token.Register(() => { try { p.Kill(true); } catch { } });
 
-            await p.WaitForExitAsync(job.Cts.Token).ConfigureAwait(false);
-            await stderrTask.ConfigureAwait(false);
-            if (p.ExitCode != 0)
-            {
-                var stderrText = stderr.ToString();
-                VideoEmpty.Core.Diagnostics.Log.Error("ffmpeg-export", $"exit={p.ExitCode} stderr={stderrText}");
-                job.Status.State = JobState.Failed;
-                job.Status.Error = stderrText;
-                return;
+                using var decReg = job.Cts.Token.Register(() => { try { if (!decoder.HasExited) decoder.Kill(true); } catch { } });
+                using var encReg = job.Cts.Token.Register(() => { try { if (!encoder.HasExited) encoder.Kill(true); } catch { } });
+
+                await encoder.WaitForExitAsync(job.Cts.Token).ConfigureAwait(false);
+                await encStderrTask.ConfigureAwait(false);
+                try { if (!decoder.HasExited) decoder.WaitForExit(2000); } catch { /* ignore */ }
+
+                if (encoder.ExitCode != 0)
+                {
+                    var msg = encStderr.ToString();
+                    VideoEmpty.Core.Diagnostics.Log.Error("ffmpeg-export", $"encoder exit={encoder.ExitCode} stderr={msg}");
+                    job.Status.State = JobState.Failed;
+                    job.Status.Error = msg;
+                    return;
+                }
+
+                job.Status.Progress = 1.0;
+                job.Status.OutputPath = options.OutputPath;
+                job.Status.State = JobState.Completed;
             }
-
-            job.Status.Progress = 1.0;
-            job.Status.OutputPath = options.OutputPath;
-            job.Status.State = JobState.Completed;
+            finally
+            {
+                foreach (var (_, _, b) in overlays) b.Dispose();
+            }
         }
         catch (OperationCanceledException)
         {
@@ -221,95 +262,114 @@ public sealed class FFmpegVideoExporter : IVideoExporter
             job.Status.State = JobState.Failed;
             job.Status.Error = ex.Message;
         }
+        finally
+        {
+            try { if (decoder is { HasExited: false }) decoder.Kill(true); } catch { }
+            try { if (encoder is { HasExited: false }) encoder.Kill(true); } catch { }
+        }
     }
 
-    /// <summary>
-    /// Builds FFmpeg args using pre-rendered per-frame PNG sequences.
-    /// Position is baked into every PNG (x=0:y=0 in overlay).
-    /// Each sequence is already pre-padded with transparent frames so that it starts
-    /// at t=0; no setpts or -itsoffset is needed. The enable window end is extended
-    /// by one frame + a small epsilon to ensure the final exit-animation frame
-    /// (which is fully off-screen) is included before the overlay is gated off.
-    /// </summary>
-    internal static List<string> BuildExportArgsFromSequences(
-        Project project, ExportOptions options,
-        List<(string dir, int frameCount, TemplateInstance inst)> seqInfos,
-        double fps)
+    private Process StartFFmpeg(List<string> args, bool captureStdout, bool captureStderr, bool captureStdin)
     {
-        var inv = CultureInfo.InvariantCulture;
-        var args = new List<string> { "-y", "-i", project.VideoPath! };
-
-        // Add every image-sequence input.  PTS starts at 0 for all inputs because
-        // transparent padding frames have already been prepended in RunJob.
-        foreach (var (dir, _, _) in seqInfos)
+        var psi = new ProcessStartInfo(_bin.FFmpegPath)
         {
-            args.Add("-f"); args.Add("image2");
-            args.Add("-framerate"); args.Add(fps.ToString("0.###", inv));
-            args.Add("-i"); args.Add(Path.Combine(dir, "frame_%06d.png"));
+            RedirectStandardOutput = captureStdout,
+            RedirectStandardError = captureStderr,
+            RedirectStandardInput = captureStdin,
+            UseShellExecute = false,
+            CreateNoWindow = true,
+        };
+        foreach (var a in args) psi.ArgumentList.Add(a);
+        var p = Process.Start(psi) ?? throw new InvalidOperationException("Failed to start ffmpeg.");
+        return p;
+    }
+
+    private (string codec, List<string> presetArgs) ResolveVideoCodec(ExportOptions options)
+    {
+        // If the caller explicitly requested a non-default codec, honour it.
+        bool isDefault = string.Equals(options.VideoCodec, "libx264", StringComparison.OrdinalIgnoreCase);
+        string codec = options.VideoCodec;
+        if (isDefault && options.UseHardwareAcceleration)
+        {
+            var hw = DetectHardwareEncoder();
+            if (hw is not null) codec = hw;
         }
+        var presetArgs = BuildPresetArgs(codec, options.Preset);
+        return (codec, presetArgs);
+    }
 
-        if (seqInfos.Count > 0)
+    private static List<string> BuildPresetArgs(string codec, string? userPreset)
+    {
+        var a = new List<string>();
+        switch (codec)
         {
-            double frameDurSec = fps > 0 ? 1.0 / fps : 1.0 / 30.0;
-            var sb = new StringBuilder();
-            // Force the source to constant framerate before overlay.  Screen
-            // recordings are typically variable framerate (frames are dropped
-            // during periods when the screen does not change).  Without this
-            // step, the overlay filter only emits an output frame whenever the
-            // source emits one, so any animation that occurs during a static
-            // period of the source video would never be rendered.  fps=N
-            // duplicates frames during gaps and decimates during bursts so the
-            // output cadence matches the image-sequence cadence exactly.
-            sb.Append("[0:v]fps=").Append(fps.ToString("0.######", inv))
-              .Append(",setpts=PTS-STARTPTS[main];");
-            string lastLabel = "main";
-            for (int i = 0; i < seqInfos.Count; i++)
+            case "h264_nvenc":
+            case "hevc_nvenc":
+                a.Add("-preset"); a.Add(userPreset ?? "p4");
+                a.Add("-tune");   a.Add("hq");
+                a.Add("-rc");     a.Add("vbr");
+                a.Add("-cq");     a.Add("23");
+                break;
+            case "h264_qsv":
+            case "hevc_qsv":
+                a.Add("-preset"); a.Add(userPreset ?? "faster");
+                a.Add("-global_quality"); a.Add("23");
+                break;
+            case "h264_amf":
+            case "hevc_amf":
+                a.Add("-quality"); a.Add(userPreset ?? "speed");
+                a.Add("-rc"); a.Add("cqp");
+                a.Add("-qp_i"); a.Add("23");
+                a.Add("-qp_p"); a.Add("23");
+                break;
+            default: // libx264 / libx265 / etc.
+                a.Add("-preset"); a.Add(userPreset ?? "veryfast");
+                break;
+        }
+        return a;
+    }
+
+    private static bool IsCrfCodec(string codec) =>
+        codec.StartsWith("libx", StringComparison.OrdinalIgnoreCase);
+
+    private string? DetectHardwareEncoder()
+    {
+        lock (_hwLock)
+        {
+            if (_hardwareEncoderProbed) return _cachedHardwareEncoder;
+            _hardwareEncoderProbed = true;
+            try
             {
-                var inst = seqInfos[i].inst;
-                double startSec = inst.StartMs / 1000.0;
-                double endSec   = (inst.StartMs + inst.DurationMs) / 1000.0;
-                string startStr = startSec.ToString("0.######", inv);
+                var psi = new ProcessStartInfo(_bin.FFmpegPath, "-hide_banner -encoders")
+                {
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true,
+                    UseShellExecute = false,
+                    CreateNoWindow = true
+                };
+                using var p = Process.Start(psi);
+                if (p is null) return null;
+                var output = p.StandardOutput.ReadToEnd();
+                p.WaitForExit(5000);
 
-                // Extend the enable window end by one extra frame so the final
-                // exit-animation frame (which is fully off-screen) is not clipped.
-                double enableEnd = endSec + frameDurSec + 0.001;
-                string enableEndStr = enableEnd.ToString("0.######", inv);
-
-                string outLabel = $"v{i + 1}";
-
-                // No setpts — timing is baked into the padded frame sequence.
-                // repeatlast=0: after the last overlay frame stop showing it.
-                // enable guards the overlay window so it is hidden outside the instance.
-                sb.Append('[').Append(lastLabel).Append("][").Append(i + 1).Append(":v]")
-                  .Append("overlay=x=0:y=0:format=auto:repeatlast=0")
-                  .Append(":enable='between(t,").Append(startStr).Append(',').Append(enableEndStr).Append(")'")
-                  .Append('[').Append(outLabel).Append("];");
-
-                lastLabel = outLabel;
+                // Prefer NVENC > QSV > AMF (rough perf ordering on consumer hardware).
+                foreach (var candidate in new[] { "h264_nvenc", "h264_qsv", "h264_amf" })
+                {
+                    if (output.Contains(candidate, StringComparison.Ordinal))
+                    {
+                        _cachedHardwareEncoder = candidate;
+                        VideoEmpty.Core.Diagnostics.Log.Info("ffmpeg-export", $"Hardware encoder available: {candidate}");
+                        return candidate;
+                    }
+                }
+                VideoEmpty.Core.Diagnostics.Log.Info("ffmpeg-export", "No hardware H.264 encoder available; using libx264.");
             }
-            if (sb.Length > 0 && sb[^1] == ';') sb.Length -= 1;
-
-            args.Add("-filter_complex"); args.Add(sb.ToString());
-            args.Add("-map"); args.Add($"[{lastLabel}]");
-            args.Add("-map"); args.Add("0:a?");
+            catch (Exception ex)
+            {
+                VideoEmpty.Core.Diagnostics.Log.Error("ffmpeg-export", "Hardware encoder probe failed", ex);
+            }
+            return _cachedHardwareEncoder;
         }
-
-        args.Add("-c:v"); args.Add(options.VideoCodec);
-        args.Add("-progress"); args.Add("pipe:2");
-        args.Add("-nostats");
-        // Force constant framerate output to match the fps filter applied at the
-        // start of the filter graph; otherwise muxers may re-introduce VFR
-        // timing from the source and animations during static periods are lost.
-        args.Add("-fps_mode"); args.Add("cfr");
-        args.Add("-r"); args.Add(fps.ToString("0.######", inv));
-        if (options.Crf is { } crf) { args.Add("-crf"); args.Add(crf.ToString(CultureInfo.InvariantCulture)); }
-        if (options.VideoBitrateKbps is { } br) { args.Add("-b:v"); args.Add($"{br}k"); }
-        args.Add("-c:a"); args.Add(options.AudioCodec);
-        args.Add("-pix_fmt"); args.Add("yuv420p");
-        // Do NOT add -shortest: it would end the video when the first image sequence ends,
-        // cutting the output to only the duration of that sequence.
-        args.Add(options.OutputPath);
-        return args;
     }
 
     private static void UpdateProgress(string line, int durationMs, JobStatus status)
