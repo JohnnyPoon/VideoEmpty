@@ -129,11 +129,26 @@ public static class CapCutProjectExporter
             removedSegments = RemovePriorVideoEmptyContent(tracks, texts, shapes, materialAnimations);
         }
 
-        var textTrack = FindOrCreateTrack(tracks, "text");
-        var stickerTrack = FindOrCreateTrack(tracks, "sticker");
+        // Always create FRESH tracks at the END of the tracks array so that:
+        //  - Sticker (shapes) goes first, text goes after → text renders ABOVE shapes
+        //    (CapCut z-orders tracks by their position in the array — later = on top).
+        //  - All our shapes share one timeline row and all our texts share another,
+        //    instead of being merged into arbitrary pre-existing tracks.
+        // The tracks themselves are tagged with OriginMarker so re-export can drop them
+        // along with their segments (see RemovePriorVideoEmptyContent).
+        var stickerTrack = CreateTaggedTrack(tracks, "sticker");
+        var textTrack = CreateTaggedTrack(tracks, "text");
+
+        // Track indices used for per-segment track_render_index (matches CapCut convention
+        // where each segment's track_render_index equals the index of its parent track).
+        int stickerTrackIdx = tracks.IndexOf(stickerTrack);
+        int textTrackIdx = tracks.IndexOf(textTrack);
 
         int baseRenderIndex = ComputeMaxRenderIndex(tracks) + 100;
-        int renderIdx = baseRenderIndex;
+        // Allocate disjoint render_index ranges so text always wins z-order over shapes
+        // even within a single template instance.
+        int shapeRenderIdx = baseRenderIndex;
+        int textRenderIdx = baseRenderIndex + 100_000;
 
         var stats = new PatchStats(0, 0, 0, removedSegments);
 
@@ -166,15 +181,14 @@ public static class CapCutProjectExporter
                 double tx = centerPxX / canvasW * 2.0 - 1.0;
                 double ty = 1.0 - centerPxY / canvasH * 2.0;
 
-                renderIdx++;
-
                 if (element is ShapeElement shape)
                 {
                     var (materialId, _) = AppendShapeMaterial(shapes, shape, elemPxW, elemPxH);
                     string? animId = options.IncludeSlideInAnimation
                         ? AppendSlideInAnimation(materialAnimations, durationUs)
                         : null;
-                    var seg = BuildSegment(materialId, startUs, durationUs, tx, ty, renderIdx, animId);
+                    int ri = shapeRenderIdx++;
+                    var seg = BuildSegment(materialId, startUs, durationUs, tx, ty, ri, stickerTrackIdx, animId);
                     stickerTrack["segments"]!.AsArray().Add(seg);
                     stats = stats with { ShapeMaterials = stats.ShapeMaterials + 1, Segments = stats.Segments + 1 };
                 }
@@ -185,7 +199,8 @@ public static class CapCutProjectExporter
                     string? animId = options.IncludeSlideInAnimation
                         ? AppendSlideInAnimation(materialAnimations, durationUs)
                         : null;
-                    var seg = BuildSegment(materialId, startUs, durationUs, tx, ty, renderIdx, animId);
+                    int ri = textRenderIdx++;
+                    var seg = BuildSegment(materialId, startUs, durationUs, tx, ty, ri, textTrackIdx, animId);
                     textTrack["segments"]!.AsArray().Add(seg);
                     stats = stats with { TextMaterials = stats.TextMaterials + 1, Segments = stats.Segments + 1 };
                 }
@@ -388,7 +403,7 @@ public static class CapCutProjectExporter
             ["text_alpha"] = text.TextColor.A / 255.0,
             ["font_name"] = "",
             ["font_title"] = "none",
-            ["font_size"] = (double)text.FontSize,
+            ["font_size"] = (double)text.FontSize / 5.0,
             ["font_path"] = "",
             ["font_id"] = "",
             ["font_resource_id"] = "",
@@ -522,14 +537,28 @@ public static class CapCutProjectExporter
 
     // ---------- Re-export cleanup ----------
 
-    /// <summary>Removes every segment whose <c>group_id</c> equals <see cref="OriginMarker"/>
-    /// and every material whose <c>videoempty_origin</c> equals <see cref="OriginMarker"/>.
+    /// <summary>Removes every segment whose <c>group_id</c> equals <see cref="OriginMarker"/>,
+    /// every material whose <c>videoempty_origin</c> equals <see cref="OriginMarker"/>, and
+    /// every track tagged with <c>videoempty_origin = OriginMarker</c>.
     /// Returns the number of segments removed.</summary>
     private static int RemovePriorVideoEmptyContent(
         JsonArray tracks, JsonArray texts, JsonArray shapes, JsonArray materialAnimations)
     {
         int segmentsRemoved = 0;
 
+        // First pass: drop entire tracks we previously created (carrying our marker).
+        for (int t = tracks.Count - 1; t >= 0; t--)
+        {
+            if (tracks[t] is JsonObject track &&
+                track["videoempty_origin"]?.GetValue<string>() == OriginMarker)
+            {
+                if (track["segments"] is JsonArray segs) segmentsRemoved += segs.Count;
+                tracks.RemoveAt(t);
+            }
+        }
+
+        // Second pass: drop individual tagged segments from any user-owned tracks
+        // (e.g. content emitted by an older exporter that didn't yet tag tracks).
         foreach (var trackNode in tracks)
         {
             if (trackNode is not JsonObject track) continue;
@@ -567,7 +596,7 @@ public static class CapCutProjectExporter
 
     // ---------- Segment builder ----------
 
-    private static JsonObject BuildSegment(string materialId, long startUs, long durationUs, double tx, double ty, int renderIndex, string? animationId = null)
+    private static JsonObject BuildSegment(string materialId, long startUs, long durationUs, double tx, double ty, int renderIndex, int trackRenderIndex, string? animationId = null)
     {
         var extraRefs = new JsonArray();
         if (!string.IsNullOrEmpty(animationId))
@@ -613,7 +642,7 @@ public static class CapCutProjectExporter
             ["group_id"] = OriginMarker,
             ["enable_color_curves"] = true,
             ["enable_hsl_curves"] = true,
-            ["track_render_index"] = 1,
+            ["track_render_index"] = trackRenderIndex,
             ["hdr_settings"] = null,
             ["enable_color_wheels"] = true,
             ["track_attribute"] = 0,
@@ -686,6 +715,27 @@ public static class CapCutProjectExporter
             ["is_default_name"] = true,
             ["name"] = "",
             ["segments"] = new JsonArray(),
+        };
+        tracks.Add(track);
+        return track;
+    }
+
+    /// <summary>Always appends a fresh track of <paramref name="type"/> at the end of
+    /// <paramref name="tracks"/>. Tagged with <see cref="OriginMarker"/> so it can be
+    /// removed on re-export. Appending at the end keeps our content visually on top
+    /// in CapCut (tracks later in the array stack above earlier ones).</summary>
+    private static JsonObject CreateTaggedTrack(JsonArray tracks, string type)
+    {
+        var track = new JsonObject
+        {
+            ["id"] = NewCapCutGuid(),
+            ["type"] = type,
+            ["attribute"] = 0,
+            ["flag"] = 0,
+            ["is_default_name"] = true,
+            ["name"] = "",
+            ["segments"] = new JsonArray(),
+            ["videoempty_origin"] = OriginMarker,
         };
         tracks.Add(track);
         return track;

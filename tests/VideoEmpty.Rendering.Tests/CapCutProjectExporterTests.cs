@@ -302,6 +302,108 @@ public class CapCutProjectExporterTests
         }
     }
 
+    [Fact]
+    public void TextTrack_AppendedAfterStickerTrack_SoTextRendersAboveShapes()
+    {
+        var src = CreateMinimalProject();
+        try
+        {
+            var (proj, _) = BuildSampleProject();
+            var result = CapCutProjectExporter.Export(proj, new CapCutExportOptions(src, CapCutExportMode.CloneProject));
+            var root = JsonNode.Parse(File.ReadAllText(result.DraftContentPath))!.AsObject();
+
+            var tracks = root["tracks"]!.AsArray();
+            int stickerIdx = -1, textIdx = -1;
+            for (int i = 0; i < tracks.Count; i++)
+            {
+                var t = tracks[i]!.AsObject();
+                if (t["videoempty_origin"]?.GetValue<string>() != "videoempty") continue;
+                var type = t["type"]!.GetValue<string>();
+                if (type == "sticker") stickerIdx = i;
+                else if (type == "text") textIdx = i;
+            }
+            Assert.True(stickerIdx >= 0 && textIdx >= 0, "Both tagged tracks should be present");
+            Assert.True(textIdx > stickerIdx,
+                "Text track must come AFTER sticker track so text renders above shapes in CapCut");
+        }
+        finally { TryDelete(src); }
+    }
+
+    [Fact]
+    public void TextSegments_HaveHigherRenderIndexThanShapeSegments()
+    {
+        var src = CreateMinimalProject();
+        try
+        {
+            var (proj, _) = BuildSampleProject();
+            var result = CapCutProjectExporter.Export(proj, new CapCutExportOptions(src, CapCutExportMode.CloneProject));
+            var root = JsonNode.Parse(File.ReadAllText(result.DraftContentPath))!.AsObject();
+
+            int minTextRi = int.MaxValue, maxShapeRi = int.MinValue;
+            foreach (var t in root["tracks"]!.AsArray())
+            {
+                var track = t!.AsObject();
+                var type = track["type"]!.GetValue<string>();
+                foreach (var s in track["segments"]!.AsArray())
+                {
+                    var ri = s!["render_index"]!.GetValue<int>();
+                    if (type == "text") minTextRi = Math.Min(minTextRi, ri);
+                    else if (type == "sticker") maxShapeRi = Math.Max(maxShapeRi, ri);
+                }
+            }
+            Assert.True(minTextRi > maxShapeRi,
+                $"Text render_index ({minTextRi}) must exceed shape render_index ({maxShapeRi})");
+        }
+        finally { TryDelete(src); }
+    }
+
+    [Fact]
+    public void TrackRenderIndex_MatchesTrackArrayIndex_AndAllShapesShareOneTrack()
+    {
+        var src = CreateMinimalProject();
+        try
+        {
+            var (proj, _) = BuildSampleProject();
+            var result = CapCutProjectExporter.Export(proj, new CapCutExportOptions(src, CapCutExportMode.CloneProject));
+            var root = JsonNode.Parse(File.ReadAllText(result.DraftContentPath))!.AsObject();
+
+            var tracks = root["tracks"]!.AsArray();
+            for (int i = 0; i < tracks.Count; i++)
+            {
+                var t = tracks[i]!.AsObject();
+                if (t["videoempty_origin"]?.GetValue<string>() != "videoempty") continue;
+                foreach (var s in t["segments"]!.AsArray())
+                    Assert.Equal(i, s!["track_render_index"]!.GetValue<int>());
+            }
+
+            // All shapes (from 2 instances) end up on a single sticker track row.
+            var stickerTrack = tracks.Single(t =>
+                t!.AsObject()["videoempty_origin"]?.GetValue<string>() == "videoempty" &&
+                t["type"]!.GetValue<string>() == "sticker");
+            Assert.Equal(2, stickerTrack!["segments"]!.AsArray().Count);
+        }
+        finally { TryDelete(src); }
+    }
+
+    [Fact]
+    public void TextMaterial_FontSize_IsStyleSize_NotRawFontSize()
+    {
+        var src = CreateMinimalProject();
+        try
+        {
+            var (proj, _) = BuildSampleProject();
+            // FontSize on the TextElement is 30 in BuildSampleProject.
+            var result = CapCutProjectExporter.Export(proj, new CapCutExportOptions(src, CapCutExportMode.CloneProject));
+            var root = JsonNode.Parse(File.ReadAllText(result.DraftContentPath))!.AsObject();
+
+            var firstText = root["materials"]!["texts"]!.AsArray()[0]!.AsObject();
+            // CapCut convention from reference: font_size = text_size / 5
+            Assert.Equal(30.0 / 5.0, firstText["font_size"]!.GetValue<double>(), precision: 4);
+            Assert.Equal(30, firstText["text_size"]!.GetValue<int>());
+        }
+        finally { TryDelete(src); }
+    }
+
     private static void TryDelete(string dir)
     {
         try
