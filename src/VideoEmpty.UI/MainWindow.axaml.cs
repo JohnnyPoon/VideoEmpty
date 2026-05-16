@@ -36,7 +36,6 @@ public partial class MainWindow : Window
     private string? _projectPath;
     private string? _armedTemplateId;
     private int _currentTimeMs;
-    private DispatcherTimer? _playTimer;
     private bool _isApplyingProject;
     private (double x, double y)? _previewHoverNormalized;
     private int _previewRenderBusy;

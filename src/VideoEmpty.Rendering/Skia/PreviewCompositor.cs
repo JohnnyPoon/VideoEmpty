@@ -24,6 +24,15 @@ public sealed class PreviewCompositor
         using var src = SKBitmap.Decode(srcData) ?? throw new InvalidOperationException("Frame decode failed.");
         var info = new SKImageInfo(src.Width, src.Height, SKColorType.Bgra8888, SKAlphaType.Premul);
         using var dst = new SKBitmap(info);
+
+        // The frame may be downscaled vs. the project's true video resolution (e.g. during
+        // streaming preview). Template coordinates/sizes are authored in original video pixels,
+        // so we draw overlays through a scaled canvas to keep their on-screen size proportional.
+        int refW = project.VideoResolution.Width  > 0 ? project.VideoResolution.Width  : src.Width;
+        int refH = project.VideoResolution.Height > 0 ? project.VideoResolution.Height : src.Height;
+        float scaleX = refW > 0 ? (float)src.Width  / refW : 1f;
+        float scaleY = refH > 0 ? (float)src.Height / refH : 1f;
+
         using (var canvas = new SKCanvas(dst))
         {
             canvas.Clear(SKColors.Black);
@@ -35,9 +44,13 @@ public sealed class PreviewCompositor
                 if (template is null) continue;
 
                 using var overlay = _renderer.RenderBitmap(template, inst.TextValues);
-                var (x, y) = ComputePosition(template, inst, timeMs, src.Width, src.Height);
+                // Compute position in original-video coordinates, then scale to frame coords.
+                var (x, y) = ComputePosition(template, inst, timeMs, refW, refH);
                 using var paint = new SKPaint { IsAntialias = true };
+                canvas.Save();
+                canvas.Scale(scaleX, scaleY);
                 canvas.DrawBitmap(overlay, x, y, paint);
+                canvas.Restore();
             }
         }
         using var img = SKImage.FromBitmap(dst);
