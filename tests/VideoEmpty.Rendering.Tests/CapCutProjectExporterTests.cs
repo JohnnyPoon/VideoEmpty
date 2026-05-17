@@ -49,6 +49,7 @@ public class CapCutProjectExporterTests
                 },
                 new TextElement
                 {
+                    Id = "text1",
                     OffsetX = 10, OffsetY = 10, Width = 380, Height = 100,
                     DefaultText = "Hello CapCut",
                     FontSize = 30,
@@ -64,9 +65,11 @@ public class CapCutProjectExporterTests
             Instances =
             {
                 // Center of canvas -> CapCut transform (0, 0)
-                new TemplateInstance { TemplateId = "tpl1", Center = new NormalizedPoint(0.5, 0.5), StartMs = 1000, DurationMs = 2000 },
+                new TemplateInstance { TemplateId = "tpl1", Center = new NormalizedPoint(0.5, 0.5), StartMs = 1000, DurationMs = 2000,
+                    TextValues = new() { ["text1"] = "Hello CapCut" } },
                 // Top-left corner -> CapCut transform (-1, +1)
-                new TemplateInstance { TemplateId = "tpl1", Center = new NormalizedPoint(0.0, 0.0), StartMs = 4000, DurationMs = 1500 },
+                new TemplateInstance { TemplateId = "tpl1", Center = new NormalizedPoint(0.0, 0.0), StartMs = 4000, DurationMs = 1500,
+                    TextValues = new() { ["text1"] = "Hello CapCut" } },
             },
         };
         return (proj, tpl);
@@ -439,9 +442,9 @@ public class CapCutProjectExporterTests
             // Create 3 overlapping instances so the text element needs 3 rows: primary + 2 spares.
             var (proj, tpl) = BuildSampleProject();
             proj.Instances.Clear();
-            proj.Instances.Add(new TemplateInstance { TemplateId = tpl.Id, Center = new NormalizedPoint(0.5, 0.5), StartMs = 0,    DurationMs = 5000 });
-            proj.Instances.Add(new TemplateInstance { TemplateId = tpl.Id, Center = new NormalizedPoint(0.5, 0.5), StartMs = 1000, DurationMs = 5000 });
-            proj.Instances.Add(new TemplateInstance { TemplateId = tpl.Id, Center = new NormalizedPoint(0.5, 0.5), StartMs = 2000, DurationMs = 5000 });
+            proj.Instances.Add(new TemplateInstance { TemplateId = tpl.Id, Center = new NormalizedPoint(0.5, 0.5), StartMs = 0,    DurationMs = 5000, TextValues = new() { ["text1"] = "Hi" } });
+            proj.Instances.Add(new TemplateInstance { TemplateId = tpl.Id, Center = new NormalizedPoint(0.5, 0.5), StartMs = 1000, DurationMs = 5000, TextValues = new() { ["text1"] = "Hi" } });
+            proj.Instances.Add(new TemplateInstance { TemplateId = tpl.Id, Center = new NormalizedPoint(0.5, 0.5), StartMs = 2000, DurationMs = 5000, TextValues = new() { ["text1"] = "Hi" } });
 
             var result = CapCutProjectExporter.Export(proj, new CapCutExportOptions(src, CapCutExportMode.CloneProject));
             var root = JsonNode.Parse(File.ReadAllText(result.DraftContentPath))!.AsObject();
@@ -464,19 +467,48 @@ public class CapCutProjectExporterTests
     }
 
     [Fact]
-    public void TextMaterial_FixedWidth_IsNegativeOne_NotElementPxWidth()
+    public void TextMaterial_FixedWidth_IsPositive_ToEnforceLeftAlign()
     {
-        // CapCut auto-fits text to fixed_width; passing a large element pixel width
-        // (e.g. 1280px Step element) inflates the rendered glyph size. We emit -1
-        // so the text size is driven by font_size/text_size only.
+        // CapCut silently force-centers text when fixed_width=-1 (verified against
+        // 342 text materials in reference 3: every alignment=0 material has
+        // fixed_width > 0). To honour HAlign=Left, we emit the element pixel width.
         var src = CreateMinimalProject();
         try
         {
             var (proj, _) = BuildSampleProject();
             var result = CapCutProjectExporter.Export(proj, new CapCutExportOptions(src, CapCutExportMode.CloneProject));
             var root = JsonNode.Parse(File.ReadAllText(result.DraftContentPath))!.AsObject();
-            foreach (var m in root["materials"]!["texts"]!.AsArray())
-                Assert.Equal(-1.0, m!["fixed_width"]!.GetValue<double>());
+            var texts = root["materials"]!["texts"]!.AsArray();
+            Assert.NotEmpty(texts);
+            foreach (var m in texts)
+                Assert.True(m!["fixed_width"]!.GetValue<double>() > 0.0,
+                    "fixed_width must be positive so CapCut respects alignment.");
+        }
+        finally { TryDelete(src); }
+    }
+
+    [Fact]
+    public void EmptyResolvedText_OmitsTextMaterialAndSegment()
+    {
+        // When an instance has no TextValues entry for a TextElement, we must NOT
+        // fall back to the template's DefaultText — that placeholder is a
+        // design-time hint only. The shape backdrop is still emitted.
+        var src = CreateMinimalProject();
+        try
+        {
+            var (proj, _) = BuildSampleProject();
+            foreach (var inst in proj.Instances) inst.TextValues.Clear();
+
+            var result = CapCutProjectExporter.Export(proj, new CapCutExportOptions(src, CapCutExportMode.CloneProject));
+            var root = JsonNode.Parse(File.ReadAllText(result.DraftContentPath))!.AsObject();
+            Assert.Empty(root["materials"]!["texts"]!.AsArray());
+            Assert.NotEmpty(root["materials"]!["shapes"]!.AsArray());
+
+            int textSegments = 0;
+            foreach (var tr in root["tracks"]!.AsArray())
+                if (tr!["type"]!.GetValue<string>() == "text")
+                    textSegments += tr["segments"]!.AsArray().Count;
+            Assert.Equal(0, textSegments);
         }
         finally { TryDelete(src); }
     }

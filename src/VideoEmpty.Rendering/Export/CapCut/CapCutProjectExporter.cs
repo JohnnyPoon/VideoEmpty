@@ -187,6 +187,11 @@ public static class CapCutProjectExporter
 
                 bool isShape = element is ShapeElement;
                 string? resolvedText = (element is TextElement te) ? ResolveText(te, instance) : null;
+                // Skip text elements with no user-supplied content — DefaultText is a
+                // design-time placeholder for the in-app preview only; we don't bucket or
+                // emit it into CapCut, otherwise an "uncustomised" instance leaks the
+                // template's stand-in copy.
+                if (!isShape && string.IsNullOrEmpty(resolvedText)) continue;
                 var key = (template.Id, element.Id);
                 if (!slots.TryGetValue(key, out var grp))
                 {
@@ -282,7 +287,11 @@ public static class CapCutProjectExporter
                     else
                     {
                         var textEl = (TextElement)spec.Element;
-                        (materialId, _) = AppendTextMaterial(texts, textEl, spec.ResolvedText ?? "", spec.PxW, spec.PxH);
+                        // Skip empty resolved text — keeps the CapCut timeline clean and prevents
+                        // template DefaultText from leaking when an instance has no custom text.
+                        if (string.IsNullOrEmpty(spec.ResolvedText))
+                            continue;
+                        (materialId, _) = AppendTextMaterial(texts, textEl, spec.ResolvedText, spec.PxW, spec.PxH);
                         ri = textRenderIdx++;
                         stats = stats with { TextMaterials = stats.TextMaterials + 1 };
                     }
@@ -311,9 +320,13 @@ public static class CapCutProjectExporter
 
     private static string ResolveText(TextElement element, TemplateInstance instance)
     {
+        // IMPORTANT: do NOT fall back to element.DefaultText here. DefaultText is a
+        // design-time placeholder used for the in-app preview only; emitting it into
+        // CapCut would leak the template's stand-in copy (e.g. "Setup GitHub Repository")
+        // as if it were real content for any instance the user hasn't customised.
         if (instance.TextValues != null && instance.TextValues.TryGetValue(element.Id, out var v) && v is not null)
             return v;
-        return element.DefaultText ?? string.Empty;
+        return string.Empty;
     }
 
     private static double ScaleSize(int value, int fromBasis, int toBasis)
@@ -560,13 +573,13 @@ public static class CapCutProjectExporter
             ["language"] = "",
             ["relevance_segment"] = new JsonArray(),
             ["original_size"] = new JsonArray(),
-            // CapCut treats fixed_width as a normalized layout hint, not a literal pixel
-            // bounding box. Using the element pixel width here makes CapCut auto-fit text
-            // to ~that many pixels — for a 1280-px Step element that comes out ~10x too big.
-            // Reference projects use a small constant (~141 in a 1920×1200 canvas). We emit
-            // -1 so CapCut falls back to its content-driven default, while font_size+text_size
-            // continue to drive the rendered glyph size.
-            ["fixed_width"] = -1.0,
+            // CapCut treats fixed_width as a layout/wrap box, not a literal glyph scale,
+            // AS LONG AS we pass a positive value. With fixed_width=-1, CapCut silently
+            // forces center alignment (verified across reference projects: every text with
+            // fixed_width=-1 has alignment=1, and every alignment=0 text has fixed_width>0).
+            // So we emit the element's pixel text-box width — glyph size is still driven by
+            // font_size (FontSize/10) and the box only governs wrap + horizontal anchor.
+            ["fixed_width"] = pxW,
             ["fixed_height"] = -1.0,
             ["line_max_width"] = 0.82,
             ["oneline_cutoff"] = false,

@@ -15,19 +15,19 @@ public static class BuiltInTemplates
     {
         Id = StepTemplateId,
         Name = "Step",
-        Width = 1280,
-        Height = 300,
+        Width = 540,
+        Height = 110,
         DefaultDurationMs = 3000,
         Animation = new Animation { Enter = AnimationStyle.SlideLeft, Exit = AnimationStyle.SlideLeft, EnterMs = 350, ExitMs = 350 },
         Elements =
         {
-            new ShapeElement { Id = "step.bg", OffsetX = 0, OffsetY = 0, Width = 1280, Height = 300,
-                Shape = ShapeKind.Rectangle, Fill = Color.White, BorderColor = Color.Black, BorderThickness = 6 },
-            new TextElement { Id = StepNumberElementId, OffsetX = 56, OffsetY = 36, Width = 1168, Height = 92,
-                FontFamily = "Segoe UI", FontSize = 70, Bold = true, TextColor = Color.Black,
+            new ShapeElement { Id = "step.bg", OffsetX = 0, OffsetY = 0, Width = 540, Height = 110,
+                Shape = ShapeKind.Rectangle, Fill = Color.White, BorderColor = Color.Black, BorderThickness = 2 },
+            new TextElement { Id = StepNumberElementId, OffsetX = 22, OffsetY = 12, Width = 488, Height = 34,
+                FontFamily = "Segoe UI", FontSize = 22, Bold = true, TextColor = Color.Black,
                 HAlign = HorizontalAlign.Left, VAlign = VerticalAlign.Top, DefaultText = "2." },
-            new TextElement { Id = StepTitleElementId, OffsetX = 56, OffsetY = 132, Width = 1168, Height = 136,
-                FontFamily = "Segoe UI", FontSize = 66, TextColor = Color.Black,
+            new TextElement { Id = StepTitleElementId, OffsetX = 22, OffsetY = 52, Width = 488, Height = 50,
+                FontFamily = "Segoe UI", FontSize = 22, TextColor = Color.Black,
                 HAlign = HorizontalAlign.Left, VAlign = VerticalAlign.Top, DefaultText = "Setup GitHub Repository" }
         }
     };
@@ -36,19 +36,19 @@ public static class BuiltInTemplates
     {
         Id = CommentTemplateId,
         Name = "Comment",
-        Width = 960,
-        Height = 150,
+        Width = 420,
+        Height = 70,
         DefaultDurationMs = 3000,
         Animation = new Animation { Enter = AnimationStyle.SlideLeft, Exit = AnimationStyle.SlideLeft, EnterMs = 350, ExitMs = 350 },
         Elements =
         {
-            new ShapeElement { Id = "comment.bg", OffsetX = 0, OffsetY = 0, Width = 960, Height = 150,
-                Shape = ShapeKind.Rectangle, Fill = Color.Black, BorderColor = Color.White, BorderThickness = 6 },
-            new TextElement { Id = CommentLine1ElementId, OffsetX = 22, OffsetY = 22, Width = 916, Height = 52,
-                FontFamily = "Segoe UI", FontSize = 52, TextColor = Color.White,
+            new ShapeElement { Id = "comment.bg", OffsetX = 0, OffsetY = 0, Width = 420, Height = 70,
+                Shape = ShapeKind.Rectangle, Fill = Color.Black, BorderColor = Color.White, BorderThickness = 2 },
+            new TextElement { Id = CommentLine1ElementId, OffsetX = 14, OffsetY = 12, Width = 392, Height = 26,
+                FontFamily = "Segoe UI", FontSize = 18, TextColor = Color.White,
                 HAlign = HorizontalAlign.Left, VAlign = VerticalAlign.Top, DefaultText = "Go to GitHub" },
-            new TextElement { Id = CommentLine2ElementId, OffsetX = 22, OffsetY = 78, Width = 916, Height = 52,
-                FontFamily = "Segoe UI", FontSize = 52, TextColor = Color.White,
+            new TextElement { Id = CommentLine2ElementId, OffsetX = 14, OffsetY = 38, Width = 392, Height = 26,
+                FontFamily = "Segoe UI", FontSize = 18, TextColor = Color.White,
                 HAlign = HorizontalAlign.Left, VAlign = VerticalAlign.Top, DefaultText = "Register or login" }
         }
     };
