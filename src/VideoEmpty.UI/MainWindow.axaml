@@ -111,7 +111,7 @@
                 <Button x:Name="UndoButton" Content="Undo"/>
                 <Button x:Name="ExportButton" Content="Export Video…" ToolTip.Tip="Export the video with captions"/>
                 <Button x:Name="ExportSubtitlesButton" Content="Export Subtitles…" ToolTip.Tip="Export captions as .srt, .vtt, or .json"/>
-                <Button x:Name="ExportCapCutButton" Content="Export to CapCut…" ToolTip.Tip="Append all template instances into an existing CapCut PC project (creates a clone by default)"/>
+                <Button x:Name="ExportCapCutButton" Content="Export to CapCut… (Preview)" ToolTip.Tip="[Preview] Append all template instances into an existing CapCut PC project (creates a clone by default). This feature is in preview - geometry, fonts and animations are still being calibrated; review the result in CapCut before relying on it."/>
                 <Separator/>
                 <Button x:Name="TogglePanelsButton" Content="◄ ► Layout" ToolTip.Tip="Toggle left/right panels"/>
                 <Button x:Name="CompactModeButton" Content="⛶ Compact" ToolTip.Tip="Maximize video, hide panels"/>

@@ -1849,7 +1849,7 @@ public partial class MainWindow : Window
 
         // Mode: clone (safe, default) or edit-in-place (creates .bak)
         var mode = await PromptChoice(
-            "Export to CapCut",
+            "Export to CapCut (Preview)",
             $"Add {_project.Instances.Count} template instance(s) to this CapCut project?\n\n" +
             "• Clone project (recommended): copies the folder and edits the copy.\n" +
             "• Edit in place: writes a .bak then modifies draft_content.json.\n\n" +
