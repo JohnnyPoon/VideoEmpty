@@ -280,7 +280,7 @@ public static class CapCutProjectExporter
                     int ri;
                     if (spec.Element is ShapeElement shape)
                     {
-                        (materialId, _) = AppendShapeMaterial(shapes, shape, spec.PxW, spec.PxH);
+                        (materialId, _) = AppendShapeMaterial(shapes, shape, spec.PxW, spec.PxH, options.ShapeScale);
                         ri = shapeRenderIdx++;
                         stats = stats with { ShapeMaterials = stats.ShapeMaterials + 1 };
                     }
@@ -291,7 +291,7 @@ public static class CapCutProjectExporter
                         // template DefaultText from leaking when an instance has no custom text.
                         if (string.IsNullOrEmpty(spec.ResolvedText))
                             continue;
-                        (materialId, _) = AppendTextMaterial(texts, textEl, spec.ResolvedText, spec.PxW, spec.PxH);
+                        (materialId, _) = AppendTextMaterial(texts, textEl, spec.ResolvedText, spec.PxW, spec.PxH, options.ShapeScale, options.FontScale);
                         ri = textRenderIdx++;
                         stats = stats with { TextMaterials = stats.TextMaterials + 1 };
                     }
@@ -337,9 +337,15 @@ public static class CapCutProjectExporter
 
     // ---------- Material builders ----------
 
-    private static (string id, JsonObject node) AppendShapeMaterial(JsonArray arr, ShapeElement shape, double pxW, double pxH)
+    private static (string id, JsonObject node) AppendShapeMaterial(JsonArray arr, ShapeElement shape, double pxW, double pxH, double shapeScale)
     {
         var id = NewCapCutGuid();
+        // Apply user-tunable export scale (see CapCutExportOptions.ShapeScale). Our
+        // template pixel geometry consistently renders larger inside CapCut than the
+        // user expects on the canvas, so we shrink shape_size / border / custom_points
+        // together to keep the proportions intact.
+        pxW *= shapeScale;
+        pxH *= shapeScale;
         double halfW = pxW / 2.0, halfH = pxH / 2.0;
         var fillHex = ToHexRgb(shape.Fill);
         var borderHex = ToHexRgb(shape.BorderColor);
@@ -358,7 +364,7 @@ public static class CapCutProjectExporter
             ["global_alpha"] = 1.0,
             ["color"] = "",
             ["border_line_style"] = 0,
-            ["border_width"] = (double)Math.Max(0, shape.BorderThickness),
+            ["border_width"] = (double)Math.Max(0, shape.BorderThickness) * shapeScale,
             ["border_color"] = borderHex,
             ["border_alpha"] = 1.0,
             ["shadow_color"] = "#000000",
@@ -396,9 +402,14 @@ public static class CapCutProjectExporter
     }
 
     private static (string id, JsonObject node) AppendTextMaterial(
-        JsonArray arr, TextElement text, string resolvedText, double pxW, double pxH)
+        JsonArray arr, TextElement text, string resolvedText, double pxW, double pxH, double shapeScale, double fontScale)
     {
         var id = NewCapCutGuid();
+        // Apply export-time tuning (see CapCutExportOptions.{ShapeScale,FontScale}).
+        // fixed_width tracks the shape wrap box (so wrap stays consistent with the
+        // co-located shape), while font_size / style.size shrink independently.
+        pxW *= shapeScale;
+        pxH *= shapeScale;
         var colorHex = ToHexRgb(text.TextColor);
         var rgbArr = new JsonArray(
             JsonValue.Create(text.TextColor.R / 255.0),
@@ -417,7 +428,7 @@ public static class CapCutProjectExporter
         //   * Empirically, a `font_size` of ~6-8 produces a normal video title; values above
         //     ~10 quickly render very large. We pick FontSize / 10 so a design-time FontSize of
         //     ~70 px maps to a CapCut font_size of ~7, matching reference titles in scale.
-        double fontSize = Math.Max(1.0, text.FontSize / 10.0);
+        double fontSize = Math.Max(1.0, text.FontSize / 10.0) * fontScale;
         double styleSize = fontSize;
         var charCount = string.IsNullOrEmpty(resolvedText) ? 0 : resolvedText.Length;
 

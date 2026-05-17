@@ -401,7 +401,7 @@ public class CapCutProjectExporterTests
 
             var firstText = root["materials"]!["texts"]!.AsArray()[0]!.AsObject();
             // CapCut convention: text_size is a constant; glyph size is driven by font_size.
-            Assert.Equal(30.0 / 10.0, firstText["font_size"]!.GetValue<double>(), precision: 4);
+            Assert.Equal(30.0 / 10.0 * 0.85, firstText["font_size"]!.GetValue<double>(), precision: 4);
             Assert.Equal(30, firstText["text_size"]!.GetValue<int>());
         }
         finally { TryDelete(src); }
@@ -509,6 +509,53 @@ public class CapCutProjectExporterTests
                 if (tr!["type"]!.GetValue<string>() == "text")
                     textSegments += tr["segments"]!.AsArray().Count;
             Assert.Equal(0, textSegments);
+        }
+        finally { TryDelete(src); }
+    }
+
+    [Fact]
+    public void ExportScale_ShrinksShapeAndFont_AndBorderProportionally()
+    {
+        // Calibrated against a user-corrected CapCut project: shape_size and
+        // border_width scale by ShapeScale, font_size by FontScale, fixed_width
+        // (the wrap box) tracks ShapeScale so text wrap stays consistent with
+        // the shape it sits on.
+        var src = CreateMinimalProject();
+        try
+        {
+            var (proj, _) = BuildSampleProject();
+            var defaultOpts = new CapCutExportOptions(src, CapCutExportMode.CloneProject);
+            var defaultResult = CapCutProjectExporter.Export(proj, defaultOpts);
+            var defaultRoot = JsonNode.Parse(File.ReadAllText(defaultResult.DraftContentPath))!.AsObject();
+
+            // Same source, no scaling -> reference values.
+            var srcUnscaled = CreateMinimalProject();
+            try
+            {
+                var unscaled = CapCutProjectExporter.Export(proj, new CapCutExportOptions(srcUnscaled, CapCutExportMode.CloneProject, ShapeScale: 1.0, FontScale: 1.0));
+                var unscaledRoot = JsonNode.Parse(File.ReadAllText(unscaled.DraftContentPath))!.AsObject();
+
+                var sDef = defaultRoot["materials"]!["shapes"]!.AsArray()[0]!.AsObject();
+                var sUns = unscaledRoot["materials"]!["shapes"]!.AsArray()[0]!.AsObject();
+                double widthDef = sDef["shape_size"]!.AsArray()[0]!.GetValue<double>();
+                double widthUns = sUns["shape_size"]!.AsArray()[0]!.GetValue<double>();
+                Assert.Equal(widthUns * defaultOpts.ShapeScale, widthDef, precision: 4);
+
+                double borderDef = sDef["border_width"]!.GetValue<double>();
+                double borderUns = sUns["border_width"]!.GetValue<double>();
+                Assert.Equal(borderUns * defaultOpts.ShapeScale, borderDef, precision: 4);
+
+                var tDef = defaultRoot["materials"]!["texts"]!.AsArray()[0]!.AsObject();
+                var tUns = unscaledRoot["materials"]!["texts"]!.AsArray()[0]!.AsObject();
+                double fontDef = tDef["font_size"]!.GetValue<double>();
+                double fontUns = tUns["font_size"]!.GetValue<double>();
+                Assert.Equal(fontUns * defaultOpts.FontScale, fontDef, precision: 4);
+
+                double fwDef = tDef["fixed_width"]!.GetValue<double>();
+                double fwUns = tUns["fixed_width"]!.GetValue<double>();
+                Assert.Equal(fwUns * defaultOpts.ShapeScale, fwDef, precision: 4);
+            }
+            finally { TryDelete(srcUnscaled); }
         }
         finally { TryDelete(src); }
     }
