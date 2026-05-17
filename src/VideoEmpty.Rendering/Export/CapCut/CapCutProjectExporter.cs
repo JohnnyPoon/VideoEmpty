@@ -105,6 +105,24 @@ public static class CapCutProjectExporter
 
     private record struct PatchStats(int TextMaterials, int ShapeMaterials, int Segments, int PreviousSegmentsRemoved);
 
+    // Per-(template, element) bucket built in pass 1; tracks/segments emitted in passes 2-3.
+    private sealed class SlotGroup
+    {
+        public string TemplateId { get; }
+        public string ElementId { get; }
+        public bool IsShape { get; }
+        public string TemplateName { get; }
+        public List<ElementSpec> Specs { get; } = new();
+        public List<List<ElementSpec>> RowAssignments { get; } = new();
+        public SlotGroup(string templateId, string elementId, bool isShape, string templateName)
+        { TemplateId = templateId; ElementId = elementId; IsShape = isShape; TemplateName = templateName; }
+    }
+
+    private sealed record ElementSpec(
+        Element Element, string? ResolvedText,
+        double PxW, double PxH, double Tx, double Ty,
+        long StartUs, long DurationUs);
+
     private static PatchStats PatchDraftContent(JsonObject root, Project project, CapCutExportOptions options)
     {
         // ----- Canvas -----
@@ -129,28 +147,14 @@ public static class CapCutProjectExporter
             removedSegments = RemovePriorVideoEmptyContent(tracks, texts, shapes, materialAnimations);
         }
 
-        // Always create FRESH tracks at the END of the tracks array so that:
-        //  - Sticker (shapes) goes first, text goes after → text renders ABOVE shapes
-        //    (CapCut z-orders tracks by their position in the array — later = on top).
-        //  - All our shapes share one timeline row and all our texts share another,
-        //    instead of being merged into arbitrary pre-existing tracks.
-        // The tracks themselves are tagged with OriginMarker so re-export can drop them
-        // along with their segments (see RemovePriorVideoEmptyContent).
-        var stickerTrack = CreateTaggedTrack(tracks, "sticker");
-        var textTrack = CreateTaggedTrack(tracks, "text");
-
-        // Track indices used for per-segment track_render_index (matches CapCut convention
-        // where each segment's track_render_index equals the index of its parent track).
-        int stickerTrackIdx = tracks.IndexOf(stickerTrack);
-        int textTrackIdx = tracks.IndexOf(textTrack);
-
-        int baseRenderIndex = ComputeMaxRenderIndex(tracks) + 100;
-        // Allocate disjoint render_index ranges so text always wins z-order over shapes
-        // even within a single template instance.
-        int shapeRenderIdx = baseRenderIndex;
-        int textRenderIdx = baseRenderIndex + 100_000;
-
-        var stats = new PatchStats(0, 0, 0, removedSegments);
+        // ----- Pass 1: build per-slot segment specs -----
+        // A "slot" is uniquely identified by (templateId, elementId). All instances of the
+        // same template using the same element slot share a CapCut row; we spill to
+        // "(slot) spare N" rows when segments overlap in time.
+        var slots = new Dictionary<(string templateId, string elementId), SlotGroup>();
+        // Preserve a deterministic emission order matching how the user authored templates,
+        // so that e.g. all "Step row 1" tracks appear above "Step row 2" tracks in CapCut.
+        var slotOrder = new List<(string templateId, string elementId)>();
 
         foreach (var instance in project.Instances)
         {
@@ -160,8 +164,6 @@ public static class CapCutProjectExporter
             long startUs = (long)instance.StartMs * 1000L;
             long durationUs = (long)instance.DurationMs * 1000L;
 
-            // Top-left of the template box, in canvas pixels.
-            // Center is the (normalized) midpoint of the template box on the video.
             double tplPxW = ScaleSize(template.Width, project.VideoResolution.Width, canvasW);
             double tplPxH = ScaleSize(template.Height, project.VideoResolution.Height, canvasH);
             double tplTopLeftX = instance.Center.X * canvasW - tplPxW / 2.0;
@@ -173,39 +175,122 @@ public static class CapCutProjectExporter
                 double elemPxH = ScaleSize(element.Height, project.VideoResolution.Height, canvasH);
                 double elemTopLeftX = tplTopLeftX + ScaleSize(element.OffsetX, project.VideoResolution.Width, canvasW);
                 double elemTopLeftY = tplTopLeftY + ScaleSize(element.OffsetY, project.VideoResolution.Height, canvasH);
-
                 double centerPxX = elemTopLeftX + elemPxW / 2.0;
                 double centerPxY = elemTopLeftY + elemPxH / 2.0;
 
-                // CapCut clip.transform is normalized [-1..1] of half-canvas with y inverted.
                 double tx = centerPxX / canvasW * 2.0 - 1.0;
                 double ty = 1.0 - centerPxY / canvasH * 2.0;
 
-                if (element is ShapeElement shape)
+                bool isShape = element is ShapeElement;
+                string? resolvedText = (element is TextElement te) ? ResolveText(te, instance) : null;
+                var key = (template.Id, element.Id);
+                if (!slots.TryGetValue(key, out var grp))
                 {
-                    var (materialId, _) = AppendShapeMaterial(shapes, shape, elemPxW, elemPxH);
-                    string? animId = options.IncludeSlideInAnimation
-                        ? AppendSlideInAnimation(materialAnimations, durationUs)
-                        : null;
-                    int ri = shapeRenderIdx++;
-                    var seg = BuildSegment(materialId, startUs, durationUs, tx, ty, ri, stickerTrackIdx, animId);
-                    stickerTrack["segments"]!.AsArray().Add(seg);
-                    stats = stats with { ShapeMaterials = stats.ShapeMaterials + 1, Segments = stats.Segments + 1 };
+                    grp = new SlotGroup(template.Id, element.Id, isShape, template.Name ?? template.Id);
+                    slots[key] = grp;
+                    slotOrder.Add(key);
                 }
-                else if (element is TextElement textEl)
+                grp.Specs.Add(new ElementSpec(element, resolvedText, elemPxW, elemPxH, tx, ty, startUs, durationUs));
+            }
+        }
+
+        // ----- Pass 2: allocate tracks (shapes first, then texts so text z-sits above) -----
+        // Always create FRESH tracks at the END of the tracks array (tagged with OriginMarker).
+        // CapCut z-orders by tracks-array position: later = on top.
+        var shapeSlotKeys = slotOrder.Where(k => slots[k].IsShape).ToList();
+        var textSlotKeys  = slotOrder.Where(k => !slots[k].IsShape).ToList();
+
+        // For each slot, greedy-assign segments to its primary row; spill to "spare" rows on overlap.
+        var slotTracks = new Dictionary<(string, string), List<JsonObject>>();
+        void AllocateSlot((string, string) key, string trackType)
+        {
+            var grp = slots[key];
+            var rows = new List<List<ElementSpec>>();              // each row's specs (sorted, non-overlapping)
+            var rowEndsUs = new List<long>();                       // latest end-time placed in each row
+
+            foreach (var spec in grp.Specs.OrderBy(s => s.StartUs))
+            {
+                long endUs = spec.StartUs + spec.DurationUs;
+                int chosen = -1;
+                for (int r = 0; r < rowEndsUs.Count; r++)
                 {
-                    var resolvedText = ResolveText(textEl, instance);
-                    var (materialId, _) = AppendTextMaterial(texts, textEl, resolvedText, elemPxW, elemPxH);
+                    if (rowEndsUs[r] <= spec.StartUs) { chosen = r; break; }
+                }
+                if (chosen < 0)
+                {
+                    chosen = rowEndsUs.Count;
+                    rows.Add(new List<ElementSpec>());
+                    rowEndsUs.Add(0L);
+                }
+                rows[chosen].Add(spec);
+                rowEndsUs[chosen] = endUs;
+            }
+
+            var emittedTracks = new List<JsonObject>();
+            for (int r = 0; r < rows.Count; r++)
+            {
+                string name = r == 0
+                    ? $"{grp.TemplateName} - {grp.ElementId}"
+                    : $"{grp.TemplateName} - {grp.ElementId} spare {r}";
+                var track = CreateTaggedTrack(tracks, trackType, name);
+                emittedTracks.Add(track);
+            }
+            slotTracks[key] = emittedTracks;
+
+            // Defer segment emission to after both shape and text tracks are created so that
+            // track indices (for track_render_index) are stable.
+            for (int r = 0; r < rows.Count; r++)
+                slots[key].RowAssignments.Add(rows[r]);
+        }
+
+        foreach (var k in shapeSlotKeys) AllocateSlot(k, "sticker");
+        foreach (var k in textSlotKeys)  AllocateSlot(k, "text");
+
+        int baseRenderIndex = ComputeMaxRenderIndex(tracks) + 100;
+        // Disjoint render_index ranges so text always wins z-order over shapes.
+        int shapeRenderIdx = baseRenderIndex;
+        int textRenderIdx = baseRenderIndex + 100_000;
+
+        var stats = new PatchStats(0, 0, 0, removedSegments);
+
+        // ----- Pass 3: emit materials + segments into their assigned tracks -----
+        void EmitSlot((string, string) key)
+        {
+            var grp = slots[key];
+            var trackList = slotTracks[key];
+            for (int r = 0; r < grp.RowAssignments.Count; r++)
+            {
+                var track = trackList[r];
+                int trackIdx = tracks.IndexOf(track);
+                foreach (var spec in grp.RowAssignments[r])
+                {
                     string? animId = options.IncludeSlideInAnimation
-                        ? AppendSlideInAnimation(materialAnimations, durationUs)
+                        ? AppendSlideInAnimation(materialAnimations, spec.DurationUs)
                         : null;
-                    int ri = textRenderIdx++;
-                    var seg = BuildSegment(materialId, startUs, durationUs, tx, ty, ri, textTrackIdx, animId);
-                    textTrack["segments"]!.AsArray().Add(seg);
-                    stats = stats with { TextMaterials = stats.TextMaterials + 1, Segments = stats.Segments + 1 };
+                    string materialId;
+                    int ri;
+                    if (spec.Element is ShapeElement shape)
+                    {
+                        (materialId, _) = AppendShapeMaterial(shapes, shape, spec.PxW, spec.PxH);
+                        ri = shapeRenderIdx++;
+                        stats = stats with { ShapeMaterials = stats.ShapeMaterials + 1 };
+                    }
+                    else
+                    {
+                        var textEl = (TextElement)spec.Element;
+                        (materialId, _) = AppendTextMaterial(texts, textEl, spec.ResolvedText ?? "", spec.PxW, spec.PxH);
+                        ri = textRenderIdx++;
+                        stats = stats with { TextMaterials = stats.TextMaterials + 1 };
+                    }
+                    var seg = BuildSegment(materialId, spec.StartUs, spec.DurationUs, spec.Tx, spec.Ty, ri, trackIdx, animId);
+                    track["segments"]!.AsArray().Add(seg);
+                    stats = stats with { Segments = stats.Segments + 1 };
                 }
             }
         }
+
+        foreach (var k in shapeSlotKeys) EmitSlot(k);
+        foreach (var k in textSlotKeys)  EmitSlot(k);
 
         // Extend project duration if needed.
         long requiredUs = project.Instances.Count == 0
@@ -465,7 +550,13 @@ public static class CapCutProjectExporter
             ["language"] = "",
             ["relevance_segment"] = new JsonArray(),
             ["original_size"] = new JsonArray(),
-            ["fixed_width"] = pxW,
+            // CapCut treats fixed_width as a normalized layout hint, not a literal pixel
+            // bounding box. Using the element pixel width here makes CapCut auto-fit text
+            // to ~that many pixels — for a 1280-px Step element that comes out ~10x too big.
+            // Reference projects use a small constant (~141 in a 1920×1200 canvas). We emit
+            // -1 so CapCut falls back to its content-driven default, while font_size+text_size
+            // continue to drive the rendered glyph size.
+            ["fixed_width"] = -1.0,
             ["fixed_height"] = -1.0,
             ["line_max_width"] = 0.82,
             ["oneline_cutoff"] = false,
@@ -724,7 +815,7 @@ public static class CapCutProjectExporter
     /// <paramref name="tracks"/>. Tagged with <see cref="OriginMarker"/> so it can be
     /// removed on re-export. Appending at the end keeps our content visually on top
     /// in CapCut (tracks later in the array stack above earlier ones).</summary>
-    private static JsonObject CreateTaggedTrack(JsonArray tracks, string type)
+    private static JsonObject CreateTaggedTrack(JsonArray tracks, string type, string? name = null)
     {
         var track = new JsonObject
         {
@@ -732,8 +823,8 @@ public static class CapCutProjectExporter
             ["type"] = type,
             ["attribute"] = 0,
             ["flag"] = 0,
-            ["is_default_name"] = true,
-            ["name"] = "",
+            ["is_default_name"] = string.IsNullOrEmpty(name),
+            ["name"] = name ?? "",
             ["segments"] = new JsonArray(),
             ["videoempty_origin"] = OriginMarker,
         };

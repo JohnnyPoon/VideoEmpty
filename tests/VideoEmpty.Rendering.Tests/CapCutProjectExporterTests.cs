@@ -404,6 +404,83 @@ public class CapCutProjectExporterTests
         finally { TryDelete(src); }
     }
 
+    [Fact]
+    public void Slot_NonOverlappingInstances_AllShareOneTrackPerElement()
+    {
+        var src = CreateMinimalProject();
+        try
+        {
+            // BuildSampleProject has 1 shape element + 1 text element; 2 non-overlapping instances
+            // (1000-3000 and 4000-5500). Expect 1 sticker track (2 segs) and 1 text track (2 segs).
+            var (proj, _) = BuildSampleProject();
+            var result = CapCutProjectExporter.Export(proj, new CapCutExportOptions(src, CapCutExportMode.CloneProject));
+            var root = JsonNode.Parse(File.ReadAllText(result.DraftContentPath))!.AsObject();
+
+            var oursStickers = root["tracks"]!.AsArray()
+                .Where(t => t!.AsObject()["videoempty_origin"]?.GetValue<string>() == "videoempty"
+                            && t["type"]!.GetValue<string>() == "sticker").ToList();
+            var oursTexts = root["tracks"]!.AsArray()
+                .Where(t => t!.AsObject()["videoempty_origin"]?.GetValue<string>() == "videoempty"
+                            && t["type"]!.GetValue<string>() == "text").ToList();
+            Assert.Single(oursStickers);
+            Assert.Single(oursTexts);
+            Assert.Equal(2, oursStickers[0]!["segments"]!.AsArray().Count);
+            Assert.Equal(2, oursTexts[0]!["segments"]!.AsArray().Count);
+        }
+        finally { TryDelete(src); }
+    }
+
+    [Fact]
+    public void Slot_OverlappingInstances_SpillToSpareTracks()
+    {
+        var src = CreateMinimalProject();
+        try
+        {
+            // Create 3 overlapping instances so the text element needs 3 rows: primary + 2 spares.
+            var (proj, tpl) = BuildSampleProject();
+            proj.Instances.Clear();
+            proj.Instances.Add(new TemplateInstance { TemplateId = tpl.Id, Center = new NormalizedPoint(0.5, 0.5), StartMs = 0,    DurationMs = 5000 });
+            proj.Instances.Add(new TemplateInstance { TemplateId = tpl.Id, Center = new NormalizedPoint(0.5, 0.5), StartMs = 1000, DurationMs = 5000 });
+            proj.Instances.Add(new TemplateInstance { TemplateId = tpl.Id, Center = new NormalizedPoint(0.5, 0.5), StartMs = 2000, DurationMs = 5000 });
+
+            var result = CapCutProjectExporter.Export(proj, new CapCutExportOptions(src, CapCutExportMode.CloneProject));
+            var root = JsonNode.Parse(File.ReadAllText(result.DraftContentPath))!.AsObject();
+
+            var ourTextTracks = root["tracks"]!.AsArray()
+                .Where(t => t!.AsObject()["videoempty_origin"]?.GetValue<string>() == "videoempty"
+                            && t["type"]!.GetValue<string>() == "text").ToList();
+            Assert.Equal(3, ourTextTracks.Count);
+
+            // Naming: primary then "spare 1", "spare 2".
+            var names = ourTextTracks.Select(t => t!["name"]!.GetValue<string>()).ToList();
+            Assert.Single(names, n => !n.Contains("spare"));
+            Assert.Single(names, n => n.EndsWith("spare 1"));
+            Assert.Single(names, n => n.EndsWith("spare 2"));
+
+            // Each spare track holds exactly one of the overlapping segments.
+            Assert.All(ourTextTracks, t => Assert.Single(t!["segments"]!.AsArray()));
+        }
+        finally { TryDelete(src); }
+    }
+
+    [Fact]
+    public void TextMaterial_FixedWidth_IsNegativeOne_NotElementPxWidth()
+    {
+        // CapCut auto-fits text to fixed_width; passing a large element pixel width
+        // (e.g. 1280px Step element) inflates the rendered glyph size. We emit -1
+        // so the text size is driven by font_size/text_size only.
+        var src = CreateMinimalProject();
+        try
+        {
+            var (proj, _) = BuildSampleProject();
+            var result = CapCutProjectExporter.Export(proj, new CapCutExportOptions(src, CapCutExportMode.CloneProject));
+            var root = JsonNode.Parse(File.ReadAllText(result.DraftContentPath))!.AsObject();
+            foreach (var m in root["materials"]!["texts"]!.AsArray())
+                Assert.Equal(-1.0, m!["fixed_width"]!.GetValue<double>());
+        }
+        finally { TryDelete(src); }
+    }
+
     private static void TryDelete(string dir)
     {
         try
