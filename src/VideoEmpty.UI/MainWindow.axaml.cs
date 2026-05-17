@@ -324,6 +324,7 @@ public partial class MainWindow : Window
         _settings.AutoDeleteBackupsDays = Math.Max(1, dlg.AutoDeleteDays ?? 90);
         _settings.SnapToGridEnabled = dlg.SnapToGridEnabled == true;
         _settings.SnapGridDivisions = Math.Max(2, dlg.SnapGridDivisions ?? 10);
+        _settings.CapCutProjectsFolder = dlg.CapCutProjectsFolder ?? "";
         UiSettingsStore.Save(_settings);
         CleanupBackups();
         RenderPlacementOverlay();
@@ -1805,9 +1806,11 @@ public partial class MainWindow : Window
             return;
         }
 
-        var defaultFolder = Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-            "CapCut", "User Data", "Projects", "com.lveditor.draft");
+        var defaultFolder = !string.IsNullOrWhiteSpace(_settings.CapCutProjectsFolder)
+            ? _settings.CapCutProjectsFolder
+            : Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                "CapCut", "User Data", "Projects", "com.lveditor.draft");
 
         IStorageFolder? startFolder = null;
         try
@@ -1825,6 +1828,18 @@ public partial class MainWindow : Window
         });
         var folder = picked.Count > 0 ? picked[0].TryGetLocalPath() : null;
         if (string.IsNullOrEmpty(folder)) return;
+
+        // Persist the parent folder as the default for next time, so future exports start here.
+        try
+        {
+            var parent = Path.GetDirectoryName(folder!);
+            if (!string.IsNullOrEmpty(parent) && parent != _settings.CapCutProjectsFolder)
+            {
+                _settings.CapCutProjectsFolder = parent;
+                UiSettingsStore.Save(_settings);
+            }
+        }
+        catch { /* best-effort */ }
 
         if (!File.Exists(Path.Combine(folder!, "draft_content.json")))
         {

@@ -156,6 +156,10 @@ public static class CapCutProjectExporter
         // so that e.g. all "Step row 1" tracks appear above "Step row 2" tracks in CapCut.
         var slotOrder = new List<(string templateId, string elementId)>();
 
+        // IMPORTANT: We only emit CapCut content for placed template *instances*, never
+        // for template definitions. Built-in/predefined templates added to project.Templates
+        // by `CreateProject` are reference data used only to look up element layout — they
+        // never produce CapCut materials or segments on their own.
         foreach (var instance in project.Instances)
         {
             var template = project.Templates.FirstOrDefault(t => t.Id == instance.TemplateId);
@@ -394,8 +398,14 @@ public static class CapCutProjectExporter
             HorizontalAlign.Right => 2,
             _ => 0,
         };
-        // CapCut "size" field in content.styles is roughly font_size / 5 (observed 30 -> 6).
-        double styleSize = Math.Max(1.0, text.FontSize / 5.0);
+        // CapCut sizing model (observed across reference projects):
+        //   * `text_size` is a fixed canvas-unit value (the reference uses 30 for every text).
+        //   * Actual glyph height is driven almost entirely by `font_size` and `style.size`.
+        //   * Empirically, a `font_size` of ~6-8 produces a normal video title; values above
+        //     ~10 quickly render very large. We pick FontSize / 10 so a design-time FontSize of
+        //     ~70 px maps to a CapCut font_size of ~7, matching reference titles in scale.
+        double fontSize = Math.Max(1.0, text.FontSize / 10.0);
+        double styleSize = fontSize;
         var charCount = string.IsNullOrEmpty(resolvedText) ? 0 : resolvedText.Length;
 
         var contentObj = new JsonObject
@@ -488,7 +498,7 @@ public static class CapCutProjectExporter
             ["text_alpha"] = text.TextColor.A / 255.0,
             ["font_name"] = "",
             ["font_title"] = "none",
-            ["font_size"] = (double)text.FontSize / 5.0,
+            ["font_size"] = fontSize,
             ["font_path"] = "",
             ["font_id"] = "",
             ["font_resource_id"] = "",
@@ -510,7 +520,7 @@ public static class CapCutProjectExporter
             ["underline_offset"] = 0.22,
             ["sub_type"] = 0,
             ["check_flag"] = 15,
-            ["text_size"] = text.FontSize,
+            ["text_size"] = 30,
             ["font_category_name"] = "",
             ["font_source_platform"] = 0,
             ["font_third_resource_id"] = "",

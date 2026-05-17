@@ -15,6 +15,7 @@ public sealed class UiSettings
     public int AutoDeleteBackupsDays { get; set; } = 90;
     public bool SnapToGridEnabled { get; set; }
     public int SnapGridDivisions { get; set; } = 10;
+    public string CapCutProjectsFolder { get; set; } = "";
 }
 
 public static class UiSettingsStore

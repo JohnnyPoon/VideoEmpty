@@ -397,8 +397,8 @@ public class CapCutProjectExporterTests
             var root = JsonNode.Parse(File.ReadAllText(result.DraftContentPath))!.AsObject();
 
             var firstText = root["materials"]!["texts"]!.AsArray()[0]!.AsObject();
-            // CapCut convention from reference: font_size = text_size / 5
-            Assert.Equal(30.0 / 5.0, firstText["font_size"]!.GetValue<double>(), precision: 4);
+            // CapCut convention: text_size is a constant; glyph size is driven by font_size.
+            Assert.Equal(30.0 / 10.0, firstText["font_size"]!.GetValue<double>(), precision: 4);
             Assert.Equal(30, firstText["text_size"]!.GetValue<int>());
         }
         finally { TryDelete(src); }
