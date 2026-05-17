@@ -41,7 +41,7 @@ public static class CapCutProjectExporter
     private const string SlideInName = "Left Slide-In";
     private const string SlideInCategoryId = "ruchang";
     private const string SlideInCategoryName = "In";
-    private const long SlideInDefaultUs = 300_000;   // 300 ms — matches reference
+    private const long SlideInDefaultUs = 500_000;   // 500 ms — matches reference (was 300 ms, too quick to notice)
 
     public static CapCutExportResult Export(Project project, CapCutExportOptions options)
     {
@@ -168,17 +168,22 @@ public static class CapCutProjectExporter
             long startUs = (long)instance.StartMs * 1000L;
             long durationUs = (long)instance.DurationMs * 1000L;
 
-            double tplPxW = ScaleSize(template.Width, project.VideoResolution.Width, canvasW);
-            double tplPxH = ScaleSize(template.Height, project.VideoResolution.Height, canvasH);
+            // Apply ShapeScale uniformly to the template's geometry (template width/height,
+            // element offsets, element widths/heights). This keeps the template centred on
+            // the instance click point while shrinking the whole layout proportionally — so
+            // shapes and text move together instead of each shrinking around its own centre
+            // and producing an internally inconsistent x-position.
+            double tplPxW = ScaleSize(template.Width, project.VideoResolution.Width, canvasW) * options.ShapeScale;
+            double tplPxH = ScaleSize(template.Height, project.VideoResolution.Height, canvasH) * options.ShapeScale;
             double tplTopLeftX = instance.Center.X * canvasW - tplPxW / 2.0;
             double tplTopLeftY = instance.Center.Y * canvasH - tplPxH / 2.0;
 
             foreach (var element in template.Elements)
             {
-                double elemPxW = ScaleSize(element.Width, project.VideoResolution.Width, canvasW);
-                double elemPxH = ScaleSize(element.Height, project.VideoResolution.Height, canvasH);
-                double elemTopLeftX = tplTopLeftX + ScaleSize(element.OffsetX, project.VideoResolution.Width, canvasW);
-                double elemTopLeftY = tplTopLeftY + ScaleSize(element.OffsetY, project.VideoResolution.Height, canvasH);
+                double elemPxW = ScaleSize(element.Width, project.VideoResolution.Width, canvasW) * options.ShapeScale;
+                double elemPxH = ScaleSize(element.Height, project.VideoResolution.Height, canvasH) * options.ShapeScale;
+                double elemTopLeftX = tplTopLeftX + ScaleSize(element.OffsetX, project.VideoResolution.Width, canvasW) * options.ShapeScale;
+                double elemTopLeftY = tplTopLeftY + ScaleSize(element.OffsetY, project.VideoResolution.Height, canvasH) * options.ShapeScale;
                 double centerPxX = elemTopLeftX + elemPxW / 2.0;
                 double centerPxY = elemTopLeftY + elemPxH / 2.0;
 
@@ -340,12 +345,9 @@ public static class CapCutProjectExporter
     private static (string id, JsonObject node) AppendShapeMaterial(JsonArray arr, ShapeElement shape, double pxW, double pxH, double shapeScale)
     {
         var id = NewCapCutGuid();
-        // Apply user-tunable export scale (see CapCutExportOptions.ShapeScale). Our
-        // template pixel geometry consistently renders larger inside CapCut than the
-        // user expects on the canvas, so we shrink shape_size / border / custom_points
-        // together to keep the proportions intact.
-        pxW *= shapeScale;
-        pxH *= shapeScale;
+        // NOTE: pxW/pxH are already scaled by ShapeScale in Pass 1 (so shape geometry stays
+        // consistent with element offsets). We only need to apply shapeScale here to the
+        // border stroke width, which is a thickness independent of the shape's footprint.
         double halfW = pxW / 2.0, halfH = pxH / 2.0;
         var fillHex = ToHexRgb(shape.Fill);
         var borderHex = ToHexRgb(shape.BorderColor);
@@ -405,11 +407,10 @@ public static class CapCutProjectExporter
         JsonArray arr, TextElement text, string resolvedText, double pxW, double pxH, double shapeScale, double fontScale)
     {
         var id = NewCapCutGuid();
-        // Apply export-time tuning (see CapCutExportOptions.{ShapeScale,FontScale}).
-        // fixed_width tracks the shape wrap box (so wrap stays consistent with the
-        // co-located shape), while font_size / style.size shrink independently.
-        pxW *= shapeScale;
-        pxH *= shapeScale;
+        // NOTE: pxW/pxH are already scaled by ShapeScale in Pass 1 — they reflect the
+        // shrunken text wrap-box footprint. shapeScale is kept in the signature only for
+        // symmetry; the font_size / style.size are independently scaled by fontScale.
+        _ = shapeScale;
         var colorHex = ToHexRgb(text.TextColor);
         var rgbArr = new JsonArray(
             JsonValue.Create(text.TextColor.R / 255.0),
